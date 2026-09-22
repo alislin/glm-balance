@@ -70,7 +70,7 @@ GLM 用量  [pro]
 ```json
 {
   "$schema": "https://opencode.ai/tui.json",
-  "plugin": ["D:/AlisL/Source/Repos/glm-balance/src/index.tsx"]
+  "plugin": ["D:/User/Source/Repos/glm-balance/src/index.tsx"]
 }
 ```
 
@@ -81,7 +81,7 @@ GLM 用量  [pro]
   "$schema": "https://opencode.ai/tui.json",
   "plugin": [
     [
-      "D:/AlisL/Source/Repos/glm-balance/src/index.tsx",
+      "D:/User/Source/Repos/glm-balance/src/index.tsx",
       {
         "organization": "org-xxxxxxxx",
         "project": "proj_xxxxxxxx",
@@ -110,6 +110,26 @@ GLM 用量  [pro]
 
 `package.json` 已配置 `exports: { "./tui": "./src/index.tsx" }`，发布后可直接在 `tui.json` 中写 `"plugin": ["opencode-glm-balance"]`。
 
+## 构建与部署
+
+一条命令完成类型检查、构建与部署：
+
+```sh
+npm run deploy
+```
+
+流程：`tsc --noEmit` → `bun build`（产出 `dist/` 目录：`index.js` 已内联 `solid-js` / `@opentui/solid` 与 JS 代码，另含原生运行库 `*.dll` / tree-sitter `*.wasm` 等资产）→ 整目录复制到 `~/.config/opencode/plugins/glm-balance/` → 更新 `tui.json` 指向产物入口 `index.js`（保留原有 `organization` / `project` 等选项），重启 opencode 后生效。
+
+也可分步执行：
+
+| 命令 | 说明 |
+| --- | --- |
+| `npm run build` | 仅构建产物 `dist/`（需 bun ≥ 1.0，非 win32-x64 平台包以桩模块替代） |
+| `node scripts/deploy.mjs` | 仅部署（dist 不存在时提示先 build） |
+| `node scripts/deploy.mjs --config-dir <path>` | 部署到指定的 opencode 配置目录 |
+
+产物为自包含目录，可单独分发：将 `dist/` 整目录放到任意位置（如 `~/.config/opencode/plugins/glm-balance/`），在 `tui.json` 的 `plugin` 数组中引用其中的 `index.js` 即可，opencode 配置目录无需安装任何依赖。注意产物平台为构建时的操作系统/架构（原生 dll 等资产不可跨平台）。
+
 ## 自定义
 
 编辑 `src/index.tsx`：
@@ -128,4 +148,4 @@ GLM 用量  [pro]
 
 ## License
 
-[MIT](./LICENSE) © AlisL
+[MIT](./LICENSE) © User

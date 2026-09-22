@@ -7,7 +7,9 @@
     "./tui": "./src/index.tsx"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "bun run scripts/build.ts",
+    "deploy": "npm run typecheck && npm run build && node scripts/deploy.mjs"
   },
   "keywords": [
     "opencode",
