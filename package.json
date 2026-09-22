@@ -1,0 +1,47 @@
+{
+  "name": "opencode-glm-balance",
+  "version": "0.1.0",
+  "description": "OpenCode TUI 插件：在侧栏显示智谱 GLM Coding Plan 用量（5h 窗口、周额度、24h tokens、分模型明细、MCP 月度、工具调用）",
+  "type": "module",
+  "exports": {
+    "./tui": "./src/index.tsx"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "opencode-tui-plugin",
+    "zhipu",
+    "zhipuai",
+    "glm",
+    "bigmodel",
+    "usage",
+    "quota",
+    "sidebar"
+  ],
+  "license": "MIT",
+  "author": "AlisL",
+  "dependencies": {
+    "@opentui/solid": "^0.4.5",
+    "solid-js": "1.9.12"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.17.0"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.18.32",
+    "@opentui/solid": "^0.4.5",
+    "solid-js": "1.9.12",
+    "typescript": "^5.8.2"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "opencode": ">=1.17.0"
+  }
+}
