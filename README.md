@@ -118,17 +118,19 @@ GLM 用量  [pro]
 npm run deploy
 ```
 
-流程：`tsc --noEmit` → `bun build`（产出 `dist/` 目录：`index.js` 已内联 `solid-js` / `@opentui/solid` 与 JS 代码，另含原生运行库 `*.dll` / tree-sitter `*.wasm` 等资产）→ 整目录复制到 `~/.config/opencode/plugins/glm-balance/` → 更新 `tui.json` 指向产物入口 `index.js`（保留原有 `organization` / `project` 等选项），重启 opencode 后生效。
+流程：`tsc --noEmit` → `bun build`（`solid-js` / `@opentui/*` 等运行时模块保持 external，不打包进产物）→ 复制 `dist/index.js` 到 `~/.config/opencode/plugins/glm-balance/` → 更新 `tui.json` 指向产物（保留原有 `organization` / `project` 等选项），重启 opencode 后生效。
+
+> **原理**：opencode 宿主启动时通过 `ensureRuntimePluginSupport` 注册模块重写，把插件对 `solid-js` / `@opentui/*` 的 bare import 直接映射到宿主自身的运行时实例。产物必须保留这些 bare import（external），内联任何一份私有副本都会导致侧栏静默失效。
 
 也可分步执行：
 
 | 命令 | 说明 |
 | --- | --- |
-| `npm run build` | 仅构建产物 `dist/`（需 bun ≥ 1.0，非 win32-x64 平台包以桩模块替代） |
+| `npm run build` | 仅构建产物 `dist/index.js`（需 bun ≥ 1.0） |
 | `node scripts/deploy.mjs` | 仅部署（dist 不存在时提示先 build） |
 | `node scripts/deploy.mjs --config-dir <path>` | 部署到指定的 opencode 配置目录 |
 
-产物为自包含目录，可单独分发：将 `dist/` 整目录放到任意位置（如 `~/.config/opencode/plugins/glm-balance/`），在 `tui.json` 的 `plugin` 数组中引用其中的 `index.js` 即可，opencode 配置目录无需安装任何依赖。注意产物平台为构建时的操作系统/架构（原生 dll 等资产不可跨平台）。
+产物为单个 JS 文件（仅插件自身代码，约 30KB），可单独分发：放到任意位置后，在 `tui.json` 的 `plugin` 数组中引用即可；`solid-js` / `@opentui/*` 运行时由 opencode 宿主注入，无需安装依赖。
 
 ## 自定义
 

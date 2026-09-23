@@ -1,5 +1,4 @@
 import { rmSync } from "node:fs"
-import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 
 rmSync(resolve(import.meta.dir, "../dist"), { recursive: true, force: true })
@@ -8,28 +7,21 @@ const result = await Bun.build({
   entrypoints: ["src/index.tsx"],
   outdir: "dist",
   target: "bun",
-  plugins: [
-    {
-      name: "stub-opentui-platforms",
-      setup(build) {
-        build.onResolve({ filter: /^@opentui\/core-(darwin|linux|win32-arm64)/ }, (args) => ({
-          path: args.path,
-          namespace: "stub-opentui",
-        }))
-        build.onLoad({ filter: /.*/, namespace: "stub-opentui" }, () => ({
-          contents: `export default ""`,
-          loader: "js",
-        }))
-        build.onResolve({ filter: /^@opentui\/core\/parser\.worker$/ }, (args) => ({
-          path: args.path,
-          namespace: "opentui-file",
-        }))
-        build.onLoad({ filter: /.*/, namespace: "opentui-file" }, () => ({
-          contents: readFileSync(resolve(import.meta.dir, "../node_modules/@opentui/core/parser.worker.js")),
-          loader: "file",
-        }))
-      },
-    },
+  external: [
+    "solid-js",
+    "solid-js/store",
+    "@opentui/solid",
+    "@opentui/solid/components",
+    "@opentui/solid/jsx-runtime",
+    "@opentui/solid/jsx-dev-runtime",
+    "@opentui/core",
+    "@opentui/core/testing",
+    "@opentui/keymap",
+    "@opentui/keymap/solid",
+    "@opentui/keymap/extras",
+    "@opentui/keymap/runtime-modules",
+    "@opencode-ai/plugin",
+    "@opencode-ai/plugin/tui",
   ],
 })
 
