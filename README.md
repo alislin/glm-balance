@@ -132,6 +132,10 @@ npm run deploy
 
 产物为单个 JS 文件（仅插件自身代码，约 30KB），可单独分发：放到任意位置后，在 `tui.json` 的 `plugin` 数组中引用即可；`solid-js` / `@opentui/*` 运行时由 opencode 宿主注入，无需安装依赖。
 
+## 任务栏常驻（Windows 11）
+
+配套 C# 小程序 [`taskbar/`](./taskbar/README.md)：把**周积分剩余 %** 实时渲染在任务栏图标上（图标数字 + 原生进度条 + 悬停摘要 + 点击详情窗口），与插件同源数据、自动复用 opencode 的 key 与团队版配置。
+
 ## 自定义
 
 编辑 `src/index.tsx`：
