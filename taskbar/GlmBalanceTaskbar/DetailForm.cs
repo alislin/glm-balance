@@ -101,7 +101,7 @@ sealed class DetailForm : Form
         Controls.Add(_btnRefresh);
 
         _btnExit = new Button { Text = "退出", Location = new Point(W - 92, 0), Size = new Size(72, 28) };
-        _btnExit.Click += (_, _) => { _reallyExit = true; Close(); };
+        _btnExit.Click += (_, _) => RequestExit();
         Controls.Add(_btnExit);
 
         // 数据区块初始全部隐藏：加载中只显示标题，首刷后填充
@@ -259,14 +259,14 @@ sealed class DetailForm : Form
         ApplyDesiredSize();
     }
 
-    static string? Cumulative(ActivityInfo? a)
+    internal static string? Cumulative(ActivityInfo? a)
     {
         if (a?.TotalTokens is not long total) return null;
         var t = $"{ActivityParser.FmtTokens(total)} tokens";
         return a.DurationLabel != null ? $"{t} · {a.DurationLabel}" : t;
     }
 
-    static string? TodayLine(ActivityInfo? a)
+    internal static string? TodayLine(ActivityInfo? a)
     {
         if (a?.TodayTokens == null && a?.PeakTokens == null) return null;
         var today = a?.TodayTokens != null ? ActivityParser.FmtTokens(a.TodayTokens.Value) : "?";
@@ -276,7 +276,7 @@ sealed class DetailForm : Form
         return $"{today}{peak}";
     }
 
-    static string? StreakLine(ActivityInfo? a)
+    internal static string? StreakLine(ActivityInfo? a)
     {
         if (a?.CurrentStreakDays == null && a?.LongestStreakDays == null) return null;
         var cur = a?.CurrentStreakDays != null ? $"{a.CurrentStreakDays} 天" : "?";
@@ -288,6 +288,16 @@ sealed class DetailForm : Form
     {
         key.Visible = val.Visible = visible && value != null;
         if (value != null) val.Text = value;
+    }
+
+    /// <summary>配额窗口单行摘要（托盘悬停浮窗复用）。</summary>
+    internal static string? LimitLine(LimitInfo? lim, string fallbackLabel)
+    {
+        if (lim == null) return null;
+        var t = $"{lim.Label ?? fallbackLabel}  {lim.Remaining?.ToString(CultureInfo.InvariantCulture) ?? "?"}%";
+        if (lim.Detail != null) t += $" · {lim.DetailLabel ?? "已用"} {lim.Detail}";
+        if (lim.ResetLabel != null) t += $" · ↻ {lim.ResetLabel}";
+        return t;
     }
 
     static void ApplyLimit(string fallbackLabel, Label lbl, Label pct, BarControl bar, Label detail, LimitInfo? lim)
@@ -307,6 +317,13 @@ sealed class DetailForm : Form
         {
             detail.Text = $"{lim.DetailLabel ?? "已用"} {lim.Detail}" + (lim.ResetLabel != null ? $" · ↻ {lim.ResetLabel}" : "");
         }
+    }
+
+    /// <summary>真正退出程序（详情窗"退出"按钮与托盘菜单共用）。</summary>
+    public void RequestExit()
+    {
+        _reallyExit = true;
+        Close();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)

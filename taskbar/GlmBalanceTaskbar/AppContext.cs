@@ -15,7 +15,10 @@ sealed class AppContext : ApplicationContext
     readonly AppConfig _cfg;
     readonly GlmApiClient _client;
     readonly DetailForm _form;
+    readonly NotifyIcon _tray;
     readonly System.Windows.Forms.Timer _timer;
+    TrayPreviewForm? _trayPreview;
+    UsageSnapshot? _lastSnap;
     Icon? _icon;
     int _busy;
     DateTimeOffset _lastActivityFetch = DateTimeOffset.MinValue;
@@ -28,6 +31,24 @@ sealed class AppContext : ApplicationContext
         _form = new DetailForm();
         MainForm = _form;
         _form.RefreshRequested += (_, _) => _ = RefreshAsync(force: true);
+
+        // 系统托盘：动态数字图标（不设置 Text，避免与自绘多行摘要浮窗重叠出现两个 tooltip）
+        _tray = new NotifyIcon
+        {
+            Visible = true,
+        };
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("打开详情", null, (_, _) => ShowMainWindow());
+        menu.Items.Add("立即刷新", null, (_, _) => _ = RefreshAsync(force: true));
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("退出", null, (_, _) => _form.RequestExit());
+        _tray.ContextMenuStrip = menu;
+        _tray.MouseClick += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left) ShowMainWindow();
+        };
+        // 悬停托盘图标（MouseMove）：弹出多行摘要浮窗（含活跃度）
+        _tray.MouseMove += (_, _) => ShowTrayPreview();
 
         // 初始占位：加载中
         _form.Text = "GLM 用量 · 加载中…";
@@ -91,6 +112,7 @@ sealed class AppContext : ApplicationContext
 
     void Apply(UsageSnapshot s)
     {
+        _lastSnap = s;
         try
         {
             if (s.Error != null)
@@ -124,10 +146,47 @@ sealed class AppContext : ApplicationContext
         }
     }
 
+    /// <summary>悬停托盘图标：显示多行摘要浮窗（周/5h/活跃度），内容取最近一次刷新快照。</summary>
+    void ShowTrayPreview()
+    {
+        var s = _lastSnap;
+        if (s == null) return;
+        try
+        {
+            _trayPreview ??= new TrayPreviewForm();
+            _trayPreview.ShowPreview(PreviewTitle(s), PreviewBody(s), Cursor.Position);
+        }
+        catch
+        {
+            /* ignore */
+        }
+    }
+
+    static string PreviewTitle(UsageSnapshot s) =>
+        $"GLM 用量{(s.Level != null ? $"  [{s.Level}]" : "")}";
+
+    static string PreviewBody(UsageSnapshot s)
+    {
+        if (s.Error != null) return s.Error;
+        var lines = new List<string>();
+        if (DetailForm.LimitLine(s.Week, "周积分") is { } week) lines.Add(week);
+        if (DetailForm.LimitLine(s.FiveHour, "5h 积分") is { } five) lines.Add(five);
+        if (s.Activity is { } a)
+        {
+            var act = string.Join(" · ", new[]
+                { DetailForm.Cumulative(a), DetailForm.TodayLine(a), DetailForm.StreakLine(a) }
+                .Where(x => x != null));
+            if (act.Length > 0) lines.Add($"活跃度  {act}");
+        }
+        lines.Add($"更新于 {s.FetchedAt.LocalDateTime:HH:mm}");
+        return string.Join("\n", lines);
+    }
+
     void SetIcon(Icon next)
     {
         var old = _icon;
         _form.Icon = next;
+        _tray.Icon = next;
         _icon = next;
         old?.Dispose();
     }
@@ -138,6 +197,11 @@ sealed class AppContext : ApplicationContext
         {
             _timer.Dispose();
             _client.Dispose();
+            // 托盘图标必须先隐藏再释放，避免残留幽灵图标
+            _tray.Visible = false;
+            _tray.Icon = null;
+            _tray.Dispose();
+            _trayPreview?.Dispose();
             _icon?.Dispose();
             _icon = null;
         }
