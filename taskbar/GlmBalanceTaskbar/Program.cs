@@ -8,6 +8,15 @@ static class Program
     const string MutexName = @"Local\GlmBalanceTaskbar.SingleInstance";
     const string ShowEventName = @"Local\GlmBalanceTaskbar.ShowWindow";
 
+    /// <summary>
+    /// 显式 AUMID：固定到任务栏的快捷方式携带相同 ID 时，运行实例的动态图标（数字）才会被
+    /// 固定按钮采用（隐式 exe 路径匹配时 Win11 固定按钮只显示静态快捷方式图标）。
+    /// </summary>
+    const string AppUserModelId = "AlisL.GlmBalanceTaskbar";
+
+    [DllImport("shell32.dll", SetLastError = true)]
+    private static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string appID);
+
     [STAThread]
     static int Main(string[] args)
     {
@@ -21,6 +30,7 @@ static class Program
         }
 
         ApplicationConfiguration.Initialize();
+        TrySetAppUserModelId();
 
         using var mutex = new Mutex(true, MutexName, out bool createdNew);
         if (!createdNew)
@@ -64,6 +74,19 @@ static class Program
         }
         GC.KeepAlive(mutex);
         return 0;
+    }
+
+    /// <summary>声明进程级显式 AUMID（须在创建任何窗口之前调用）；失败时退回隐式标识，不影响运行。</summary>
+    static void TrySetAppUserModelId()
+    {
+        try
+        {
+            SetCurrentProcessExplicitAppUserModelID(AppUserModelId);
+        }
+        catch
+        {
+            /* ignore */
+        }
     }
 
     /// <summary>控制台模式：抓取一次并打印解析结果（对齐 scripts/e2e-check.ts 的输出）。</summary>
