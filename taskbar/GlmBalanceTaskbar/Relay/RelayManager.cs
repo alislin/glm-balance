@@ -316,6 +316,8 @@ public sealed class RelayManager : IDisposable
                 CooldownRemainingSec: ins.CooldownRemainingSec,
                 ErrorStreak: ins.ErrorStreak,
                 RemainingPct: ins.RemainingPct,
+                FiveHourPct: ins.FiveHourPct,
+                WeekPct: ins.WeekPct,
                 SourceLabel: ins.SourceLabel,
                 LastUsedAt: ins.LastUsedAt,
                 LastProbeAt: ins.LastProbeAt,

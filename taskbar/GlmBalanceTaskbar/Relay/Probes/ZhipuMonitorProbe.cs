@@ -48,7 +48,8 @@ public sealed class ZhipuMonitorProbe : IUsageProbe
         return Pick(fresh);
     }
 
-    /// <summary>取 5h / 周窗口剩余的较小者（先耗尽的窗口决定可用性），并标注来源。</summary>
+    /// <summary>取 5h / 周窗口剩余的较小者（先耗尽的窗口决定可用性），并标注来源；
+    /// 两窗口剩余分别给出（admin 总览分条展示）。</summary>
     static ProbeResult Pick(UsageSnapshot s)
     {
         int? best = null;
@@ -63,7 +64,9 @@ public sealed class ZhipuMonitorProbe : IUsageProbe
             best = wk;
             label = s.Week.Label ?? "周积分";
         }
-        return new ProbeResult(true, best, null, null, label);
+        return new ProbeResult(true, best, null, null, label,
+            FiveHourPct: s.FiveHour?.Remaining,
+            WeekPct: s.Week?.Remaining);
     }
 
     string MonitorBase(ProviderConfig p)

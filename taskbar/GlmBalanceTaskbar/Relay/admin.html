@@ -269,8 +269,12 @@ async function loadOverview() {
     if (p.state === "cooldown") extra = `${p.cooldownReason || ""} · 剩余 ${p.cooldownRemainingSec}s`;
     else if (p.state === "degraded") extra = p.degradedReason || "";
     else if (p.state === "no-key") extra = "apiKey 为空且全局读取链无 key";
-    const pctBar = p.remainingPct != null
-      ? `<div class="bar"><i style="width:${Math.max(0, Math.min(100, p.remainingPct))}%;background:${p.remainingPct < 15 ? "var(--bad)" : p.remainingPct < 40 ? "var(--warn)" : "var(--ok)"}"></i></div> ${p.remainingPct}%`
+    // 用量分窗口展示：5h / 周各一条（probe=zhipu-monitor 给出分窗口值）；单窗口缺失只渲染可用条，均无数据回退合并值
+    const bar = (label, pct) => `<span class="muted">${label}</span>` +
+      `<div class="bar"><i style="width:${Math.max(0, Math.min(100, pct))}%;background:${pct < 15 ? "var(--bad)" : pct < 40 ? "var(--warn)" : "var(--ok)"}"></i></div> ${pct}%`;
+    const pctBar = (p.fiveHourPct != null || p.weekPct != null)
+      ? (p.fiveHourPct != null ? bar("5h", p.fiveHourPct) : "") + (p.weekPct != null ? bar("周", p.weekPct) : "")
+      : p.remainingPct != null ? bar(p.sourceLabel || "剩余", p.remainingPct)
       : "–";
     return `<div class="card">
       <div class="row" style="justify-content:space-between">

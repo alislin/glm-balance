@@ -40,6 +40,8 @@ public sealed class ProviderRuntime
     int _errorStreak;
     string? _degradedReason;
     int? _remainingPct;
+    int? _fiveHourPct;
+    int? _weekPct;
     string? _sourceLabel;
     DateTimeOffset? _resetAt;
     DateTimeOffset? _lastProbeAt;
@@ -212,6 +214,8 @@ public sealed class ProviderRuntime
                 return;
             }
             _remainingPct = r.RemainingPct;
+            _fiveHourPct = r.FiveHourPct;
+            _weekPct = r.WeekPct;
             _sourceLabel = r.SourceLabel;
             _resetAt = r.ResetAt;
 
@@ -274,6 +278,8 @@ public sealed class ProviderRuntime
         int? CooldownRemainingSec,
         int ErrorStreak,
         int? RemainingPct,
+        int? FiveHourPct,
+        int? WeekPct,
         string? SourceLabel,
         DateTimeOffset? LastUsedAt,
         DateTimeOffset? LastProbeAt,
@@ -304,7 +310,7 @@ public sealed class ProviderRuntime
                 }
             }
             ins = new Inspection(state, _degradedReason, _cooldownReason, remain, _errorStreak,
-                _remainingPct, _sourceLabel, _lastUsedAt, _lastProbeAt, _lastError,
+                _remainingPct, _fiveHourPct, _weekPct, _sourceLabel, _lastUsedAt, _lastProbeAt, _lastError,
                 _requestCount, _failCount,
                 _requestCount > 0 ? (double)_totalLatencyMs / _requestCount : 0);
         }
@@ -324,6 +330,8 @@ public sealed class ProviderRuntime
             _errorStreak = snap.ErrorStreak;
             _degradedReason = snap.DegradedReason;
             _remainingPct = snap.RemainingPct;
+            _fiveHourPct = snap.FiveHourPct;
+            _weekPct = snap.WeekPct;
             _sourceLabel = snap.SourceLabel;
             _lastProbeAt = snap.LastProbeAt;
             _lastError = snap.LastError;

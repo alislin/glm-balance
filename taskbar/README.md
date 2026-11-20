@@ -183,7 +183,7 @@ opencode (localrelay provider) ──http://127.0.0.1:8787/v1──▶ GlmBalanc
 | `POST /v1/chat/completions` | Bearer localToken | OpenAI 兼容转发（请求体原样透传，不重序列化） |
 | `GET /v1/models` | Bearer localToken | 池内 Enabled 渠道 models 并集（OpenAI 格式） |
 | `GET /health` | 免 | `{"status":"ok"}` |
-| `GET /status` | 免（仅本机回环） | 渠道状态 JSON（state/lastError/lastUsed/冷却剩余/计数/用量% + current） |
+| `GET /status` | 免（仅本机回环） | 渠道状态 JSON（state/lastError/lastUsed/冷却剩余/计数/用量%（remainingPct=较小窗口值，另含 fiveHourPct / weekPct 分窗口值）+ current） |
 | `GET /admin` | 免 | 管理面板（五 Tab：总览 / Provider 池 / 日志 / 部署 / 设置） |
 | `/api/*` | Bearer localToken | 管理 JSON API（provider CRUD / move / test / import、agents deploy、settings、logs；key 只写不读，响应一律掩码） |
 

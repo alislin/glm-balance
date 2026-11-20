@@ -14,6 +14,8 @@ public sealed record ProviderStatus(
     int? CooldownRemainingSec,
     int ErrorStreak,
     int? RemainingPct,
+    int? FiveHourPct,
+    int? WeekPct,
     string? SourceLabel,
     DateTimeOffset? LastUsedAt,
     DateTimeOffset? LastProbeAt,

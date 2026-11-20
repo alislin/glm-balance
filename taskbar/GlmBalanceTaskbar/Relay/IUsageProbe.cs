@@ -8,12 +8,16 @@ namespace GlmBalanceTaskbar;
 /// <param name="ResetAt">窗口重置时间（未知 = null）。</param>
 /// <param name="Error">探测失败原因。</param>
 /// <param name="SourceLabel">剩余量的来源窗口标签（如 "5h"/"周积分"，仅展示用）。</param>
+/// <param name="FiveHourPct">5 小时窗口剩余百分比（未知 = null）。</param>
+/// <param name="WeekPct">周窗口剩余百分比（未知 = null）。</param>
 public sealed record ProbeResult(
     bool Available,
     int? RemainingPct,
     DateTimeOffset? ResetAt,
     string? Error,
-    string? SourceLabel = null);
+    string? SourceLabel = null,
+    int? FiveHourPct = null,
+    int? WeekPct = null);
 
 /// <summary>用量探测接口。</summary>
 public interface IUsageProbe
