@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -134,13 +135,15 @@ public sealed class RelayServer : IDisposable
         }
         catch (Exception ex)
         {
+            // r3 修复：响应可能已开始（部分头/体已发出），二次写必抛异常且客户端拿到畸形响应；
+            // 写 500 失败时 Abort 连接，让失败显式化而非静默空 body
             try
             {
                 await WriteErrorAsync(ctx.Response, 500, ex.Message, "internal_error", null).ConfigureAwait(false);
             }
             catch
             {
-                /* 客户端已断开等 */
+                Abort(ctx.Response);
             }
         }
     }
@@ -271,7 +274,7 @@ public sealed class RelayServer : IDisposable
 
                 default: // 4xx 业务错 → 原样回传不转移
                     rt.NoteClientError((int)outcome.StatusCode, Trunc(outcome.ErrorText, 120), DateTimeOffset.Now);
-                    await WriteUpstreamClientErrorAsync(rsp, outcome).ConfigureAwait(false);
+                    await WriteUpstreamClientErrorAsync(rsp, outcome, rt.Id).ConfigureAwait(false);
                     _mgr.RecordRequest(model, chain, (int)outcome.StatusCode, sw.ElapsedMilliseconds, Trunc(outcome.ErrorText, 120));
                     return;
             }
@@ -310,7 +313,17 @@ public sealed class RelayServer : IDisposable
             }
             catch
             {
-                /* ignore */
+                // r3 修复：读取失败重试一次（读原始字节宽松解码），不再静默变空串——
+                // 空串会被 4xx 透传成空 body（round3 缺陷 1 的间歇根因）
+                try
+                {
+                    var raw = await res.Content.ReadAsByteArrayAsync(CancellationToken.None).ConfigureAwait(false);
+                    errText = Encoding.UTF8.GetString(raw);
+                }
+                catch
+                {
+                    errText = "";
+                }
             }
             res.Dispose();
 
@@ -425,12 +438,33 @@ public sealed class RelayServer : IDisposable
         try { rsp.Abort(); } catch { /* ignore */ }
     }
 
-    /// <summary>4xx 业务错原样回传（状态码 + Content-Type + body）。</summary>
-    async Task WriteUpstreamClientErrorAsync(HttpListenerResponse rsp, UpstreamOutcome o)
+    /// <summary>
+    /// 4xx 业务错原样回传（状态码 + Content-Type + body）。
+    /// 上游未提供错误体或读取失败时，由 relay 生成最小错误说明兜底——客户端永远拿到非空可诊断的 body（round3 缺陷 1）。
+    /// </summary>
+    async Task WriteUpstreamClientErrorAsync(HttpListenerResponse rsp, UpstreamOutcome o, string providerId)
     {
-        var bytes = Encoding.UTF8.GetBytes(o.ErrorText ?? "");
+        var body = o.ErrorText;
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            body = RelayJson.Serialize(new
+            {
+                error = new
+                {
+                    message = $"上游渠道 {providerId} 返回 HTTP {(int)o.StatusCode}（错误体为空或读取失败）",
+                    type = "upstream_error",
+                    code = ((int)o.StatusCode).ToString(CultureInfo.InvariantCulture),
+                    provider = providerId,
+                },
+            });
+            rsp.ContentType = "application/json; charset=utf-8"; // 兜底体必为 JSON，覆盖上游可能缺失/异常的 Content-Type
+        }
+        else
+        {
+            rsp.ContentType = o.ContentType ?? "application/json";
+        }
+        var bytes = Encoding.UTF8.GetBytes(body);
         rsp.StatusCode = (int)o.StatusCode;
-        rsp.ContentType = o.ContentType ?? "application/json";
         rsp.ContentLength64 = bytes.Length;
         await rsp.OutputStream.WriteAsync(bytes).ConfigureAwait(false);
         rsp.Close();
