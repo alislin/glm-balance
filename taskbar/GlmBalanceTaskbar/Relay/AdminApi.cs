@@ -299,6 +299,8 @@ public sealed class AdminApi
                 adminUrl = o.AdminUrl,
                 baseUrl = o.BaseUrl,
                 running = _mgr.Running,
+                enabled = o.Enabled,
+                initialized = _mgr.Initialized,
             })).ConfigureAwait(false);
             return;
         }
@@ -308,6 +310,24 @@ public sealed class AdminApi
             if (body == null) { await WriteAsync(rsp, 400, "{\"error\":\"请求体不是合法 JSON\"}").ConfigureAwait(false); return; }
             var o = _mgr.Options;
             var portChanged = false;
+
+            // 中转启停开关（与 DetailForm 开关同源语义，RelayManager.SetEnabled）：
+            // enabled=true → 未运行即启用（未初始化时自动初始化空配置）；
+            // enabled=false → 停止运行时并把配置置为关闭（覆盖启动失败的残留态）；失败回滚进 warnings。
+            var startStopWarnings = new List<string>();
+            var enabledApplied = true;
+            if (body["enabled"] is JsonNode en)
+            {
+                var want = en.GetValue<bool>();
+                if (want && !_mgr.Running)
+                {
+                    enabledApplied = _mgr.SetEnabled(true, startStopWarnings);
+                }
+                else if (!want && _mgr.Options.Enabled)
+                {
+                    enabledApplied = _mgr.SetEnabled(false, startStopWarnings);
+                }
+            }
 
             if ((int?)body["port"] is int port && port != o.Port)
             {
@@ -333,17 +353,22 @@ public sealed class AdminApi
                 warnings.Add("token 已重置：opencode 端 localrelay provider 需同步重新部署，否则请求将 401");
             }
 
-            var ok = _mgr.PersistAndApply(relay => _mgr.Options.ToJson(), warnings); // 设置整节点重序列化（含 providers 原样）
+            var ok = enabledApplied && _mgr.PersistAndApply(relay => _mgr.Options.ToJson(), warnings); // 设置整节点重序列化（含 providers 原样）
+            var allWarnings = startStopWarnings.Concat(warnings).ToList();
             await WriteAsync(rsp, ok ? 200 : 500, RelayJson.Serialize(new
             {
                 ok,
-                warnings,
+                warnings = allWarnings,
                 restartRequired = portChanged,
                 tokenReset,
                 newToken = tokenReset ? newToken : null,
-                message = ok
-                    ? (portChanged ? "设置已写回；端口变更需重启程序生效" : "设置已写回并即时生效")
-                    : "写回失败",
+                running = _mgr.Running,
+                initialized = _mgr.Initialized,
+                message = !enabledApplied
+                    ? "中转启停失败（见 warnings）"
+                    : ok
+                        ? portChanged ? "设置已写回；端口变更需重启程序生效" : "设置已写回并即时生效"
+                        : "写回失败",
             })).ConfigureAwait(false);
             return;
         }

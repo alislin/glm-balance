@@ -22,10 +22,11 @@ public sealed record ProviderStatus(
     long FailCount,
     double AvgLatencyMs);
 
-/// <summary>中转服务整体状态快照。</summary>
+/// <summary>中转服务整体状态快照（Initialized：配置存在 relay 段；false = 未初始化引导态）。</summary>
 public sealed record RelayStatus(
     bool Running,
     bool Enabled,
+    bool Initialized,
     int Port,
     string? CurrentId,
     DateTimeOffset? StartedAt,

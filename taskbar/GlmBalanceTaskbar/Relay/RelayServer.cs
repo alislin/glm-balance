@@ -23,6 +23,7 @@ public sealed class RelayServer : IDisposable
     HttpListener? _listener;
     CancellationTokenSource? _cts;
     Task? _acceptLoop;
+    int _inflight; // 进行中的 /v1/chat/completions 请求数（Stop 宽限期依据）
 
     public RelayServer(RelayManager mgr)
     {
@@ -59,7 +60,17 @@ public sealed class RelayServer : IDisposable
         return true;
     }
 
-    public void Stop()
+    /// <summary>进行中的 /v1/chat/completions 请求数（RelayManager.Stop 宽限期轮询依据）。</summary>
+    public int Inflight => Interlocked.CompareExchange(ref _inflight, 0, 0);
+
+    /// <summary>停止接受新请求：listener 停止后 pending GetContext 退出；已受理请求的响应可继续写完。</summary>
+    public void StopAccepting()
+    {
+        try { _listener?.Stop(); } catch { /* ignore */ }
+    }
+
+    /// <summary>宽限期后的全量关停：取消请求 CTS（残余 in-flight 经异常路径 Abort）并关闭 listener。</summary>
+    public void Shutdown()
     {
         try { _cts?.Cancel(); } catch { /* ignore */ }
         try { _listener?.Stop(); } catch { /* ignore */ }
@@ -71,7 +82,7 @@ public sealed class RelayServer : IDisposable
 
     public void Dispose()
     {
-        Stop();
+        Shutdown();
         _upstream.Dispose();
     }
 
@@ -121,7 +132,16 @@ public sealed class RelayServer : IDisposable
                     break;
 
                 case "/v1/chat/completions" when method == "POST":
-                    await HandleChatAsync(ctx, ct).ConfigureAwait(false);
+                    // in-flight 计数：Stop 的宽限期据此等待长请求写完（其余端点均短请求，不计）
+                    Interlocked.Increment(ref _inflight);
+                    try
+                    {
+                        await HandleChatAsync(ctx, ct).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        Interlocked.Decrement(ref _inflight);
+                    }
                     break;
 
                 case var p when p.StartsWith("/api/", StringComparison.Ordinal):

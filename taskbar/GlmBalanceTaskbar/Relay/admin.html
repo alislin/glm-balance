@@ -71,6 +71,7 @@
 
 <!-- ── 总览 ── -->
 <section id="tab-overview">
+  <div id="ov-banner"></div>
   <div class="card row">
     <div class="kpi"><div class="k">当前通道</div><div class="v" id="ov-current">–</div></div>
     <div class="kpi"><div class="k">运行时长</div><div class="v" id="ov-uptime">–</div></div>
@@ -121,6 +122,14 @@
 
 <!-- ── 设置 ── -->
 <section id="tab-settings" class="hidden">
+  <div class="card" style="margin-bottom:10px">
+    <div class="row" style="justify-content:space-between">
+      <div class="row"><b>中转服务</b><span class="muted" id="st-relay-state">…</span></div>
+      <button class="act primary" id="st-relay-btn" onclick="toggleRelay()">…</button>
+    </div>
+    <div class="muted" style="margin-top:6px">与详情窗口的「启用/关闭中转」开关同源；关闭后 opencode 默认模型 localrelay 将不可用，管理面板服务也随之停止。</div>
+    <div id="st-relay-msg" style="margin-top:6px"></div>
+  </div>
   <div class="card">
     <b>运行参数</b>
     <div class="grid2" style="margin-top:10px">
@@ -219,6 +228,10 @@ document.querySelectorAll("#tabs button").forEach(b => {
   });
 });
 const activeTab = () => document.querySelector("#tabs button.active").dataset.tab;
+function gotoTab(name) {
+  const btn = document.querySelector(`#tabs button[data-tab="${name}"]`);
+  if (btn) btn.click();
+}
 
 // ────────── 总览 ──────────
 function fmtUptime(sec) {
@@ -238,6 +251,18 @@ async function loadOverview() {
   document.getElementById("hd-info").textContent =
     `http://127.0.0.1:${ov.port}/v1 · ${ov.running ? "运行中" : "已停止"}${ov.authDisabled ? " · 免鉴权模式" : ""}`;
   document.getElementById("hd-token-state").textContent = ov.authDisabled ? "⚠ token 写回失败，免鉴权" : "";
+
+  // 引导横幅：运行中但存在启用且缺 key 的渠道 → 步骤清单 + Provider 池锚点
+  const nokey = (ov.providers || []).filter(p => p.enabled && p.state === "no-key");
+  const banner = ov.running && nokey.length ? `<div class="card" style="border-left:4px solid var(--warn)">
+    <b>🧭 完成接入配置（引导）</b>
+    <ol style="margin:6px 0 8px 20px">
+      ${nokey.map(p => `<li>在 Provider 池为 <b>${escapeHtml(p.id)}</b> 填写 API Key → 保存生效</li>`).join("")}
+      <li>填写保存后渠道自动参与路由，本横幅消失</li>
+    </ol>
+    <button class="act primary" onclick="gotoTab('providers')">打开 Provider 池填写</button>
+  </div>` : "";
+  document.getElementById("ov-banner").innerHTML = banner;
 
   const cards = (ov.providers || []).map(p => {
     let extra = "";
@@ -475,8 +500,12 @@ async function deployConfirm() {
 }
 
 // ────────── 设置 ──────────
+let _relayRunning = false;    // 数据同源 /api/settings 的 running（RelayManager）
+let _relayInitialized = true;
 async function loadSettings() {
   const s = await api("/api/settings");
+  _relayRunning = !!s.running;
+  _relayInitialized = !!s.initialized;
   document.getElementById("st-port").value = s.port;
   document.getElementById("st-probe").value = s.probeIntervalSeconds;
   document.getElementById("st-degrade").value = s.degradeBelowPct;
@@ -484,6 +513,32 @@ async function loadSettings() {
   document.getElementById("st-quota").value = s.cooldown.quotaSeconds;
   document.getElementById("st-eth").value = s.cooldown.errorThreshold;
   document.getElementById("st-ets").value = s.cooldown.errorSeconds;
+  const st = document.getElementById("st-relay-state");
+  st.textContent = _relayRunning ? "运行中（端口 " + s.port + "）"
+    : _relayInitialized ? "已关闭" : "未初始化";
+  const btn = document.getElementById("st-relay-btn");
+  btn.textContent = _relayRunning ? "关闭中转" : "启用中转";
+  btn.className = _relayRunning ? "act danger" : "act primary";
+}
+
+async function toggleRelay() {
+  const turningOn = !_relayRunning;
+  if (!turningOn && !confirm("关闭后 opencode 默认模型 localrelay 将不可用。\n\n确认关闭中转？（管理面板服务将一并停止）")) return;
+  try {
+    const r = await api("/api/settings", {
+      method: "PUT", headers: Object.assign({ "Content-Type": "application/json" }, hdrs()),
+      body: JSON.stringify({ enabled: turningOn }),
+    });
+    if (r.ok && turningOn) {
+      showMsg("st-relay-msg", "中转已启用并运行；刷新后可见渠道状态。", true);
+      await refreshAll();
+    } else if (r.ok) {
+      showMsg("st-relay-msg", "中转已关闭：管理面板服务已停止。重新启用请在详情窗口点「启用中转」。", true);
+      (r.warnings || []).forEach(w => showMsg("st-relay-msg", "⚠ " + w, true));
+    } else {
+      showMsg("st-relay-msg", "操作失败：" + ((r.warnings || []).join("; ") || r.message || "未知"), false);
+    }
+  } catch (e) { showMsg("st-relay-msg", e.message, false); }
 }
 
 async function saveSettings() {

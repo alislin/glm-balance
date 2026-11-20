@@ -119,7 +119,9 @@ opencode (localrelay provider) ──http://127.0.0.1:8787/v1──▶ GlmBalanc
 
 ### 启用方式
 
-在 **exe 同目录** `glmbalance-taskbar.json` 中加入 `relay` 段（该段整体缺省 → 中转关闭，原功能零影响）：
+**首启引导（推荐）**：配置无 `relay` 段时，详情窗口「模型中转」分组显示「启用中转」开关——点按即自动生成完整 `relay` 段（端口 8787、自动生成 localToken、播种 zhipu-coding / custom-relay 渠道）并启动运行时，无需手工编辑配置文件；随后在管理面板 Provider 池为 custom-relay 填写 API Key 即完成接入。也可随时用同一开关关闭/再启用（运行时启停，不重启程序；关闭前会确认）。
+
+手工方式：在 **exe 同目录** `glmbalance-taskbar.json` 中加入 `relay` 段（该段整体缺省 → 中转关闭，原功能零影响）：
 
 ```jsonc
 {

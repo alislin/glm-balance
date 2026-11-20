@@ -55,6 +55,9 @@ sealed class DetailForm : Form
 
     readonly Label _lblRelayHeader;
     readonly Label[] _lblRelayRows;
+    readonly Label _lblRelayHint;
+    readonly Button _btnRelayToggle;
+    readonly Button _btnRelayGuide;
     const int MaxRelayRows = 6;
 
     readonly List<Section> _sections;
@@ -66,6 +69,9 @@ sealed class DetailForm : Form
 
     /// <summary>用户点击"管理面板"。</summary>
     public event EventHandler? PanelRequested;
+
+    /// <summary>用户点击中转分组头部的「启用/关闭中转」开关。</summary>
+    public event EventHandler? RelayToggleRequested;
 
     public DetailForm()
     {
@@ -103,7 +109,7 @@ sealed class DetailForm : Form
         _sparkChart = new SparkChartControl { Location = new Point(88, 0), Size = new Size(W - 104, 44), TabStop = false };
         Controls.Add(_sparkChart);
 
-        // 模型中转分组（每渠道一行；无 relay 配置时整体隐藏，不占位）
+        // 模型中转分组（三态：未初始化/显式关闭 → 开关 + 说明；运行 → 渠道行；运行中缺 key → 引导态）
         _lblRelayHeader = AddLabel("模型中转", PageMargin, 0, 200, 20, muted: true, bold: true);
         _lblRelayRows = new Label[MaxRelayRows];
         for (var i = 0; i < MaxRelayRows; i++)
@@ -111,6 +117,16 @@ sealed class DetailForm : Form
             _lblRelayRows[i] = AddLabel("", 34, 0, W - PageMargin - 34, 20, muted: false, fontSize: 8.5F);
             _lblRelayRows[i].Visible = false;
         }
+        int W2 = ClientSize.Width;
+        _lblRelayHint = AddLabel("", PageMargin, 0, W2 - PageMargin * 2, 32, muted: true, fontSize: 8.5F);
+        _lblRelayHint.Visible = false;
+        _btnRelayToggle = new Button { Text = "启用中转", Location = new Point(W2 - PageMargin - 76, 0), Size = new Size(76, 22) };
+        _btnRelayToggle.Click += (_, _) => RelayToggleRequested?.Invoke(this, EventArgs.Empty);
+        Controls.Add(_btnRelayToggle);
+        _btnRelayGuide = new Button { Text = "打开管理面板完成配置", Location = new Point(PageMargin, 0), Size = new Size(168, 26) };
+        _btnRelayGuide.Click += (_, _) => PanelRequested?.Invoke(this, EventArgs.Empty);
+        _btnRelayGuide.Visible = false;
+        Controls.Add(_btnRelayGuide);
 
         _lblModels = AddLabel("", PageMargin, 0, W - PageMargin * 2, 72);
         _lblUpdated = AddLabel("", 116, 0, 126, 18, muted: true);
@@ -140,7 +156,7 @@ sealed class DetailForm : Form
         SetRow(_lblActStreakKey, _lblActStreakVal, false, null);
         _lblActSparkKey.Visible = _sparkChart.Visible = false;
         _lblModels.Visible = false;
-        _lblRelayHeader.Visible = false;
+        // 中转分组头部与开关常驻（三态均显示开关；未初始化另有说明行）
 
         // 区块注册（顺序即布局顺序）
         _sections = new List<Section>
@@ -181,11 +197,16 @@ sealed class DetailForm : Form
         detail = AddLabel("", PageMargin, 0, W - PageMargin * 2, 20, muted: true);
     }
 
-    /// <summary>「模型中转」区块：标题行 + 每渠道一行（随 UpdateRelay 显隐；无 relay 时整块隐藏不占位）。</summary>
+    /// <summary>
+    /// 「模型中转」区块：标题行（含启停开关）+ 说明行（未初始化）+ 引导按钮行（运行中缺 key）+
+    /// 每渠道一行（随 UpdateRelay 显隐）。
+    /// </summary>
     Section RelaySection()
     {
         var s = new Section();
-        s.Rows.Add(Rw(20, _lblRelayHeader));
+        s.Rows.Add(new Row { Controls = new Control[] { _lblRelayHeader, _btnRelayToggle }, Height = () => 24 });
+        s.Rows.Add(new Row { Controls = new Control[] { _lblRelayHint }, Height = () => _lblRelayHint.Visible ? _lblRelayHint.Height : 0 });
+        s.Rows.Add(new Row { Controls = new Control[] { _btnRelayGuide }, Height = () => _btnRelayGuide.Visible ? _btnRelayGuide.Height + 4 : 0 });
         foreach (var lbl in _lblRelayRows)
         {
             s.Rows.Add(new Row { Controls = new Control[] { lbl }, Height = () => lbl.Visible ? 20 : 0 });
@@ -233,36 +254,64 @@ sealed class DetailForm : Form
         Relayout();
     }
 
-    /// <summary>更新「模型中转」分组（随刷新节流调用）；null = relay 未运行，整块隐藏。</summary>
+    /// <summary>
+    /// 更新「模型中转」分组（随刷新节流调用）。三态：
+    /// 未初始化（无 relay 段）→ 开关「启用中转」+ 一句话说明；
+    /// 显式关闭 → 开关「启用中转」（保留既有配置，点按后原样启用）；
+    /// 运行 → 开关「关闭中转」+ 渠道行；启用但存在缺 key 渠道 → 引导态（列待完成项 + 打开面板按钮）。
+    /// </summary>
     public void UpdateRelay(RelayStatus? st)
     {
-        var visible = st is { Providers.Count: > 0 };
-        _lblRelayHeader.Visible = visible;
-        if (!visible)
+        var running = st is { Running: true };
+        _btnRelayToggle.Text = running ? "关闭中转" : "启用中转";
+
+        // 未初始化说明行（仅未初始化且未运行时显示）
+        var showHint = st is { Initialized: false } && !running;
+        _lblRelayHint.Visible = showHint;
+        if (showHint)
         {
-            foreach (var lbl in _lblRelayRows) lbl.Visible = false;
-            return;
+            _lblRelayHint.Text = "尚未初始化：点击「启用中转」自动生成配置并启动本地中转服务。";
         }
+
+        // 引导态：运行中但存在启用且缺 key 的渠道 → 列待完成项 + 打开面板按钮
+        var missing = running && st!.Providers.Any(p => p.Enabled && !p.HasKey);
+        _btnRelayGuide.Visible = missing;
+
         var i = 0;
-        for (; i < Math.Min(st!.Providers.Count, MaxRelayRows); i++)
+        if (running)
         {
-            var (text, color, isCurrent) = RelayRowText(st.Providers[i], st.CurrentId);
-            var lbl = _lblRelayRows[i];
-            lbl.Visible = true;
-            lbl.Text = text;
-            lbl.ForeColor = color;
-            lbl.Font = new Font("Segoe UI", isCurrent ? 9F : 8.5F, isCurrent ? FontStyle.Bold : FontStyle.Regular);
+            var rows = st!.Providers;
+            for (; i < Math.Min(rows.Count, MaxRelayRows); i++)
+            {
+                var p = rows[i];
+                var lbl = _lblRelayRows[i];
+                lbl.Visible = true;
+                if (p.Enabled && !p.HasKey)
+                {
+                    // 引导文案：缺 key 渠道列待完成项
+                    lbl.Text = $"  {p.Id}：请在 Provider 池填写 API Key";
+                    lbl.ForeColor = Colors.Warning;
+                    lbl.Font = new Font("Segoe UI", 8.5F);
+                }
+                else
+                {
+                    var (text, color, isCurrent) = RelayRowText(p, st.CurrentId);
+                    lbl.Text = text;
+                    lbl.ForeColor = color;
+                    lbl.Font = new Font("Segoe UI", isCurrent ? 9F : 8.5F, isCurrent ? FontStyle.Bold : FontStyle.Regular);
+                }
+            }
+            if (rows.Count > MaxRelayRows)
+            {
+                _lblRelayRows[^1].Visible = true;
+                _lblRelayRows[^1].Text = $"  …共 {rows.Count} 个渠道";
+                _lblRelayRows[^1].ForeColor = Colors.Muted;
+                _lblRelayRows[^1].Font = new Font("Segoe UI", 8.5F);
+            }
         }
         for (; i < MaxRelayRows; i++)
         {
             _lblRelayRows[i].Visible = false;
-        }
-        if (st.Providers.Count > MaxRelayRows)
-        {
-            _lblRelayRows[^1].Visible = true;
-            _lblRelayRows[^1].Text = $"  …共 {st.Providers.Count} 个渠道";
-            _lblRelayRows[^1].ForeColor = Colors.Muted;
-            _lblRelayRows[^1].Font = new Font("Segoe UI", 8.5F);
         }
         Relayout();
     }

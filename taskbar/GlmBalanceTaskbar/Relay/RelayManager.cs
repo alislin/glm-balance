@@ -32,10 +32,11 @@ public sealed class RelayManager : IDisposable
     /// <summary>--once 离线评估模式：禁止任何文件写回。</summary>
     bool _offline;
 
-    public RelayManager(AppConfig cfg, RelayOptions opts, string? configPath = null)
+    public RelayManager(AppConfig cfg, RelayOptions opts, string? configPath = null, bool initialized = true)
     {
         _cfg = cfg;
         _opts = opts;
+        Initialized = initialized;
         _configPath = configPath ?? Path.Combine(
             Path.GetDirectoryName(Environment.ProcessPath ?? Environment.GetCommandLineArgs()[0]) ?? ".",
             "glmbalance-taskbar.json");
@@ -50,6 +51,8 @@ public sealed class RelayManager : IDisposable
     public RelayOptions Options => _opts;
     public ChannelRouter Router => _router;
     public bool Running { get; private set; }
+    /// <summary>配置文件存在 relay 段（false = 未初始化引导态：等待用户点击「启用中转」）。</summary>
+    public bool Initialized { get; }
     public string AdminUrl => _opts.AdminUrl;
     public string BaseUrl => _opts.BaseUrl;
 
@@ -145,11 +148,57 @@ public sealed class RelayManager : IDisposable
     public void Stop()
     {
         Running = false;
+        var server = _server;
+        _server = null;
+        if (server != null)
+        {
+            // 1) 立即停止接受新请求；已受理的 in-flight 响应可继续写完
+            server.StopAccepting();
+            // 2) 宽限 ≤3s 处理 in-flight，超时由 Shutdown 经取消/异常路径 Abort
+            var deadline = Environment.TickCount64 + GracePeriodMs;
+            while (server.Inflight > 0 && Environment.TickCount64 < deadline)
+            {
+                Thread.Sleep(50);
+            }
+            // 3) 全量关停（listener 关闭 + 请求 CTS 取消）
+            server.Shutdown();
+        }
+        // 探测调度暂停（状态快照保留：Providers 仍在，Running=false）
         try { _probeCts?.Cancel(); } catch { /* ignore */ }
         try { _probeCts?.Dispose(); } catch { /* ignore */ }
         _probeCts = null;
-        _server?.Dispose();
-        _server = null;
+    }
+
+    /// <summary>Stop 时处理 in-flight 请求的宽限上限（毫秒）。</summary>
+    const int GracePeriodMs = 3000;
+
+    /// <summary>
+    /// 运行时启停开关（DetailForm 开关与 admin settings 同源语义）：
+    /// enable=true → 写回 enabled 并启动（未初始化时经 Start() 的 token/播种路径自动初始化空配置）；
+    /// enable=false → 写回 enabled=false 并停止运行时（不删除既有 providers 配置）。
+    /// 启动失败（端口占用等）→ 状态回滚为关闭并写回，warnings 带原因，不残留半初始化状态。
+    /// </summary>
+    public bool SetEnabled(bool enable, List<string> warnings)
+    {
+        if (enable)
+        {
+            if (Running) return true; // 重入安全
+            _opts.Enabled = true;
+            Persist(relay => { relay["enabled"] = true; return relay; }, warnings);
+            if (Start(warnings)) return true;
+            // 失败回滚：状态回滚为关闭（保留已写回的完整配置段，仅 enabled=false）
+            _opts.Enabled = false;
+            warnings.Add("中转启用失败：已回滚为关闭状态");
+            Persist(relay => { relay["enabled"] = false; return relay; }, warnings);
+            return false;
+        }
+        else
+        {
+            _opts.Enabled = false;
+            var ok = Persist(relay => { relay["enabled"] = false; return relay; }, warnings);
+            Stop();
+            return ok;
+        }
     }
 
     public void Dispose() => Stop();
@@ -248,7 +297,7 @@ public sealed class RelayManager : IDisposable
             fail = _todayFailovers;
         }
         return new RelayStatus(
-            Running, _opts.Enabled, _opts.Port, current, _startedAt,
+            Running, _opts.Enabled, Initialized, _opts.Port, current, _startedAt,
             _startedAt is { } st ? (now - st).TotalSeconds : 0,
             req, fail,
             _authDisabled, false,

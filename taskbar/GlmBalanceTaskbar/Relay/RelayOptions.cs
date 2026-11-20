@@ -66,6 +66,17 @@ public sealed class RelayOptions
     public string BaseUrl => $"http://127.0.0.1:{Port}/v1";
     public string AdminUrl => $"http://127.0.0.1:{Port}/admin";
 
+    /// <summary>
+    /// 未初始化态（配置无 relay 段）的内存默认：参数取默认值并播种渠道，Enabled=true；
+    /// 仅在用户点击「启用中转」时经 Start() 的 token/播种持久化路径写回，不在启动时自动落盘。
+    /// </summary>
+    public static RelayOptions CreateDefault()
+    {
+        var o = new RelayOptions { Enabled = true };
+        o.SeedDefaults();
+        return o;
+    }
+
     /// <summary>解析 "relay" 段；段缺失返回 null（中转关闭）；解析失败记 warnings 并返回 null。</summary>
     public static RelayOptions? Parse(JsonElement root, List<string> warnings)
     {
