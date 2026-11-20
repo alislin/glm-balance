@@ -28,6 +28,13 @@ static class Program
         {
             return RunDumpIcon();
         }
+        // 无头首启初始化：--relay-init <dir> 对 <dir>\glmbalance-taskbar.json 执行与 UI
+        // 「启用中转」开关完全相同的初始化例程（不监听端口、不占用单实例互斥、完成后退出）
+        var relayInitIdx = Array.FindIndex(args, a => a.Equals("--relay-init", StringComparison.OrdinalIgnoreCase));
+        if (relayInitIdx >= 0 && relayInitIdx + 1 < args.Length)
+        {
+            return RunRelayInit(args[relayInitIdx + 1]);
+        }
 
         ApplicationConfiguration.Initialize();
         TrySetAppUserModelId();
@@ -87,6 +94,66 @@ static class Program
         {
             /* ignore */
         }
+    }
+
+    /// <summary>
+    /// 无头首启初始化（--relay-init &lt;dir&gt;）：对 &lt;dir&gt;\glmbalance-taskbar.json 执行与 UI
+    /// 「启用中转」开关完全相同的初始化例程。目标文件独立于 exe 同目录配置读取；不监听端口，
+    /// 可在 live 实例运行时安全执行。退出码：0=成功（含幂等跳过），1=失败。
+    /// </summary>
+    static int RunRelayInit(string dir)
+    {
+        AttachParentConsole();
+        try
+        {
+            Directory.CreateDirectory(dir);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"error: 创建目录失败 {dir}: {ex.Message}");
+            return 1;
+        }
+        var cfgPath = Path.Combine(dir, "glmbalance-taskbar.json");
+        var cfg = AppConfig.Load(); // 仅取全局 apiKey 读取链；relay 段按目标文件独立解析
+        var warnings = new List<string>();
+
+        RelayOptions? targetOpts = null;
+        try
+        {
+            if (File.Exists(cfgPath))
+            {
+                using var stream = File.OpenRead(cfgPath);
+                using var doc = System.Text.Json.JsonDocument.Parse(stream);
+                targetOpts = RelayOptions.Parse(doc.RootElement, warnings);
+            }
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"读取 {cfgPath} 失败：{ex.Message}");
+        }
+
+        var opts = targetOpts ?? RelayOptions.CreateDefault();
+        var mgr = new RelayManager(cfg, opts, configPath: cfgPath, initialized: targetOpts != null);
+        var ok = mgr.InitHeadless(warnings);
+        foreach (var w in warnings)
+        {
+            Console.WriteLine("warn: " + w);
+        }
+        if (!ok)
+        {
+            Console.WriteLine("FAIL");
+            return 1;
+        }
+
+        // 骨架回显（token 掩码，不打印全文）
+        Console.WriteLine($"relay-init: {cfgPath}");
+        Console.WriteLine($"  enabled={opts.Enabled} port={opts.Port} localToken={FmtTokenState(opts.LocalToken)}");
+        foreach (var p in opts.Providers)
+        {
+            Console.WriteLine($"  - {p.Id} ({p.Name}) priority={p.Priority} probe={p.Probe} apiKey={(p.ApiKey.Length > 0 ? "非空" : "空")} models=[{string.Join(", ", p.Models)}] enabled={p.Enabled}");
+        }
+        Console.WriteLine("OK");
+        return 0;
     }
 
     /// <summary>控制台模式：抓取一次并打印解析结果（对齐 scripts/e2e-check.ts 的输出）。</summary>

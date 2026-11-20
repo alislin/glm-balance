@@ -48,13 +48,6 @@ sealed class AppContext : ApplicationContext
         _relay = relay;
         _form.SetWarnings(cfg.Warnings); // M4：启动期警告（含 relay 启动失败）在详情窗可见
 
-        // 测试钩子：--auto-init-relay 走与「启用中转」开关完全相同的路径（首启引导沙箱验证用）
-        if (Environment.GetCommandLineArgs()
-                .Any(a => a.Equals("--auto-init-relay", StringComparison.OrdinalIgnoreCase)))
-        {
-            _ = ToggleRelayAsync();
-        }
-
         // 系统托盘：动态数字图标（不设置 Text，避免与自绘多行摘要浮窗重叠出现两个 tooltip）
         _tray = new NotifyIcon
         {

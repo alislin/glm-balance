@@ -173,6 +173,42 @@ public sealed class RelayManager : IDisposable
     const int GracePeriodMs = 3000;
 
     /// <summary>
+    /// --relay-init 无头初始化：执行与 UI「启用中转」开关完全相同的配置生成例程
+    /// （relay 段整体生成：enabled=true、port=8787、localToken 自动生成写回、默认参数、
+    /// providers 播种 zhipu-coding / custom-relay），但不监听端口、不启动运行时、无 UI。
+    /// 幂等：已存在 relay 段且 enabled=true 时跳过；显式关闭时与 UI 开关同语义——
+    /// 保留既有 providers/配置，仅置 enabled=true（再次启用）。
+    /// </summary>
+    public bool InitHeadless(List<string> warnings)
+    {
+        if (Initialized)
+        {
+            if (_opts.Enabled)
+            {
+                warnings.Add("relay 段已存在且启用：跳过初始化（保留既有配置）");
+                return true;
+            }
+            _opts.Enabled = true;
+            var reOk = Persist(relay => { relay["enabled"] = true; return relay; }, warnings);
+            if (reOk) warnings.Add("中转已置为启用（保留既有 providers/配置，仅 enabled=true）");
+            return reOk;
+        }
+        _opts.Enabled = true;
+        if (string.IsNullOrWhiteSpace(_opts.LocalToken))
+        {
+            _opts.LocalToken = GenerateToken();
+        }
+        // 与 Start() 的 token/播种写回同一载荷（ToJson 全节点），生成结果与 UI 开关一致
+        var ok = Persist(relay => _opts.ToJson(), warnings);
+        if (ok)
+        {
+            _opts.Seeded = false;
+            warnings.Add("relay 段已生成：enabled=true、port=8787、localToken 自动生成、providers 播种 zhipu-coding/custom-relay（custom-relay 需在 Provider 池填写 key）");
+        }
+        return ok;
+    }
+
+    /// <summary>
     /// 运行时启停开关（DetailForm 开关与 admin settings 同源语义）：
     /// enable=true → 写回 enabled 并启动（未初始化时经 Start() 的 token/播种路径自动初始化空配置）；
     /// enable=false → 写回 enabled=false 并停止运行时（不删除既有 providers 配置）。
