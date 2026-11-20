@@ -316,6 +316,7 @@ public sealed class AdminApi
             // enabled=false → 停止运行时并把配置置为关闭（覆盖启动失败的残留态）；失败回滚进 warnings。
             var startStopWarnings = new List<string>();
             var enabledApplied = true;
+            var disableAfterResponse = false; // 关闭路径：Stop 推迟到本响应写出之后（见下方）
             if (body["enabled"] is JsonNode en)
             {
                 var want = en.GetValue<bool>();
@@ -325,7 +326,15 @@ public sealed class AdminApi
                 }
                 else if (!want && _mgr.Options.Enabled)
                 {
-                    enabledApplied = _mgr.SetEnabled(false, startStopWarnings);
+                    // 与 SetEnabled(false) 相同语义，但拆成两步：Stop 会 Shutdown listener 并
+                    // 切断当前连接，响应必须在停机前写出，否则客户端只会看到连接重置。
+                    // ① 此处仅持久化 enabled=false；② 响应写出完成后再停运行时（下方 fire-and-forget）。
+                    enabledApplied = _mgr.PersistAndApply(relay => { relay["enabled"] = false; return relay; }, startStopWarnings);
+                    if (enabledApplied)
+                    {
+                        _mgr.Options.Enabled = false;
+                        disableAfterResponse = true;
+                    }
                 }
             }
 
@@ -362,14 +371,25 @@ public sealed class AdminApi
                 restartRequired = portChanged,
                 tokenReset,
                 newToken = tokenReset ? newToken : null,
-                running = _mgr.Running,
+                running = disableAfterResponse ? false : _mgr.Running,
                 initialized = _mgr.Initialized,
                 message = !enabledApplied
                     ? "中转启停失败（见 warnings）"
-                    : ok
-                        ? portChanged ? "设置已写回；端口变更需重启程序生效" : "设置已写回并即时生效"
-                        : "写回失败",
+                    : disableAfterResponse
+                        ? "中转已关闭"
+                        : ok
+                            ? portChanged ? "设置已写回；端口变更需重启程序生效" : "设置已写回并即时生效"
+                            : "写回失败",
             })).ConfigureAwait(false);
+            if (disableAfterResponse)
+            {
+                // 响应已提交（WriteAsync 内 rsp.Close()），现在停机安全；后台执行以免阻塞响应收尾。
+                _ = Task.Run(() =>
+                {
+                    try { _mgr.Stop(); }
+                    catch { /* 停机异常经 /status / 详情窗可见，不影响已发出的响应 */ }
+                });
+            }
             return;
         }
         await WriteAsync(rsp, 405, "{\"error\":\"method_not_allowed\"}").ConfigureAwait(false);
