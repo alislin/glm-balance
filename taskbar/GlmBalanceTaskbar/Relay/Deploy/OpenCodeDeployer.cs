@@ -76,7 +76,7 @@ public sealed class OpenCodeDeployer : IAgentDeployer
                 root["model"] = $"localrelay/{model}";
             }
 
-            await File.WriteAllTextAsync(ConfigPath, root.ToJsonString(RelayJson.Indented))
+            await WriteAtomicAsync(ConfigPath, root.ToJsonString(RelayJson.Indented))
                 .ConfigureAwait(false);
             return new DeployResult(true, backupPath,
                 "已写入 localrelay provider" + (req.SetDefault ? " 并设为全局默认模型" : "") +
@@ -86,6 +86,15 @@ public sealed class OpenCodeDeployer : IAgentDeployer
         {
             return new DeployResult(false, backupPath, $"写入失败：{ex.Message}（备份保留在 {Path.GetFileName(backupPath)}）");
         }
+    }
+
+    /// <summary>原子写（M5）：临时文件 + File.Replace，避免写一半崩溃留半截 JSON。</summary>
+    static async Task WriteAtomicAsync(string path, string content)
+    {
+        var tmp = path + ".tmp";
+        await File.WriteAllTextAsync(tmp, content).ConfigureAwait(false);
+        if (File.Exists(path)) File.Replace(tmp, path, null);
+        else File.Move(tmp, path);
     }
 
     string BuildSummary(JsonObject root, JsonObject provider, DeployRequest req)

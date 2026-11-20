@@ -162,7 +162,7 @@ opencode (localrelay provider) ──http://127.0.0.1:8787/v1──▶ GlmBalanc
 | `relay.cooldown.errorThreshold` / `errorSeconds` | `3` / `60` | 5xx/网络异常连续 N 次冷却 M 秒 |
 | `relay.providers[].priority` | — | 升序优先（默认优先，用量还有就优先）；平序按配置数组顺序 |
 | `relay.providers[].probe` | `none` | `zhipu-monitor`（quota/limit 探测，优先复用任务栏轮询快照）/ `none`（不可检查，纯反应式） |
-| `relay.providers[].apiKey` | 空 | 空 → 复用全局读取链；空 key 的渠道 = `disabled(no-key)` 不参与路由 |
+| `relay.providers[].apiKey` | 空 | 空 → 复用全局读取链；空 key 的渠道 = `disabled(no-key)` 不参与路由。**第三方（非智谱）渠道必须显式填 key**：全局读取链是智谱定向的，非智谱域渠道留空会被判为 `no-key` 而非静默继承智谱 key |
 | `relay.agents.pi.configPath` | 空 | Pi 配置路径（占位预留） |
 
 ### 渠道状态机

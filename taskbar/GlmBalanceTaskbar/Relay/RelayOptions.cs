@@ -234,7 +234,7 @@ public sealed class RelayOptions
             }
             var relayNode = EnsureRelay(root);
             mutateRelay(relayNode);
-            File.WriteAllText(path, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            WriteAtomic(path, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
             return true;
         }
         catch (Exception ex)
@@ -242,6 +242,15 @@ public sealed class RelayOptions
             warnings?.Add($"配置写回失败（{Path.GetFileName(path)}）：{ex.Message}");
             return false;
         }
+    }
+
+    /// <summary>原子写：临时文件 + File.Replace（目标不存在则直接移动），避免写一半崩溃留半截 JSON。</summary>
+    static void WriteAtomic(string path, string content)
+    {
+        var tmp = path + ".tmp";
+        File.WriteAllText(tmp, content);
+        if (File.Exists(path)) File.Replace(tmp, path, null);
+        else File.Move(tmp, path);
     }
 
     /// <summary>在根对象上取或建 relay 节。</summary>

@@ -459,7 +459,8 @@ async function loadDeploy() {
 async function deployPreview() {
   const setDefault = document.getElementById("dp-default").checked;
   try {
-    const r = await api(`/api/agents/opencode/deploy?dryRun=true&setDefault=${setDefault}`);
+    // 服务端只收 POST（H2）：预览同样走 POST + dryRun=true
+    const r = await api(`/api/agents/opencode/deploy?dryRun=true&setDefault=${setDefault}`, { method: "POST" });
     showMsg("dp-msg", r.preview || r.message || "(空)", r.ok, true);
   } catch (e) { showMsg("dp-msg", e.message, false); }
 }

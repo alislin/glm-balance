@@ -32,6 +32,7 @@ public sealed class ProviderRuntime
 {
     readonly object _gate = new();
     readonly RelayOptions _opts;
+    readonly Func<ProviderConfig, string?>? _keyRefresher;
 
     ProviderState _state = ProviderState.Normal;
     DateTimeOffset? _cooldownUntil;
@@ -48,10 +49,11 @@ public sealed class ProviderRuntime
     long _failCount;
     long _totalLatencyMs;
 
-    public ProviderRuntime(ProviderConfig config, RelayOptions opts)
+    public ProviderRuntime(ProviderConfig config, RelayOptions opts, Func<ProviderConfig, string?>? keyRefresher = null)
     {
         Config = config;
         _opts = opts;
+        _keyRefresher = keyRefresher;
     }
 
     public ProviderConfig Config { get; }
@@ -70,28 +72,50 @@ public sealed class ProviderRuntime
             {
                 _state = ProviderState.DisabledNoKey;
                 _degradedReason = "无 API key";
-                _lastError = "apiKey 为空且全局读取链无 key";
+                _lastError = "apiKey 为空且不满足全局读取链回退条件（第三方渠道需显式配置 key）";
             }
         }
     }
 
+    /// <summary>
+    /// 重解析 key（鉴权类冷却归位时调用，F2）：重读配置与全局读取链，
+    /// 避免归位后持失效旧 key 形成"冷却→401"循环直至重启。
+    /// </summary>
+    public void RefreshKey()
+    {
+        if (_keyRefresher == null) return;
+        var key = _keyRefresher(Config);
+        SetResolvedKey(key);
+    }
+
+    /// <summary>冷却到期归位（锁内调用）：归位 + 重解析 key + 清计数。</summary>
+    void CooldownExpire_Locked()
+    {
+        _state = ProviderState.Normal;
+        _cooldownUntil = null;
+        _cooldownReason = null;
+        _errorStreak = 0;
+    }
+
     public bool Supports(string model) => Config.Models.Contains(model);
 
-    /// <summary>当前是否可被路由（Enabled ∧ 有 key ∧ 状态 normal；冷却到期惰性归位；degraded/no-key 不参与路由）。</summary>
+    /// <summary>当前是否可被路由（Enabled ∧ 有 key ∧ 状态 normal；冷却到期惰性归位并重解析 key；degraded/no-key 不参与路由）。</summary>
     public bool IsRoutable(DateTimeOffset now)
     {
+        var expired = false;
+        bool routable;
         lock (_gate)
         {
             if (!Config.Enabled || _state == ProviderState.DisabledNoKey) return false;
             if (_state == ProviderState.Cooldown && _cooldownUntil is { } until && now >= until)
             {
-                _state = ProviderState.Normal;
-                _cooldownUntil = null;
-                _cooldownReason = null;
-                _errorStreak = 0;
+                CooldownExpire_Locked();
+                expired = true;
             }
-            return _state == ProviderState.Normal;
+            routable = _state == ProviderState.Normal;
         }
+        if (expired) RefreshKey(); // 锁外执行：鉴权类冷却归位重读 key
+        return routable;
     }
 
     /// <summary>请求成功：错误计数清零。</summary>
@@ -260,6 +284,8 @@ public sealed class ProviderRuntime
 
     public Inspection Inspect(DateTimeOffset now)
     {
+        var expired = false;
+        Inspection ins;
         lock (_gate)
         {
             var state = _state;
@@ -268,22 +294,22 @@ public sealed class ProviderRuntime
             {
                 if (now >= until)
                 {
+                    CooldownExpire_Locked();
+                    expired = true;
                     state = ProviderState.Normal;
-                    _state = ProviderState.Normal;
-                    _cooldownUntil = null;
-                    _cooldownReason = null;
-                    _errorStreak = 0;
                 }
                 else
                 {
                     remain = (int)Math.Ceiling((until - now).TotalSeconds);
                 }
             }
-            return new Inspection(state, _degradedReason, _cooldownReason, remain, _errorStreak,
+            ins = new Inspection(state, _degradedReason, _cooldownReason, remain, _errorStreak,
                 _remainingPct, _sourceLabel, _lastUsedAt, _lastProbeAt, _lastError,
                 _requestCount, _failCount,
                 _requestCount > 0 ? (double)_totalLatencyMs / _requestCount : 0);
         }
+        if (expired) RefreshKey(); // 锁外执行
+        return ins;
     }
 
     /// <summary>同 id 重建池时继承旧运行时的状态与统计（配置热更新不丢观测）。</summary>

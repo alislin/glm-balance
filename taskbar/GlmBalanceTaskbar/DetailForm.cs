@@ -17,6 +17,7 @@ sealed class DetailForm : Form
     readonly Label _lblTitle;
     readonly Label _lblLevel;
     readonly Label _lblError;
+    readonly Label _lblWarn;
 
     readonly Label _lbl5h;
     readonly Label _lbl5hPct;
@@ -82,6 +83,7 @@ sealed class DetailForm : Form
         _lblTitle = AddLabel("GLM 用量", PageMargin, 0, 140, 26, bold: true, fontSize: 12F);
         _lblLevel = AddLabel("", 168, 0, 240, 24, muted: true);
         _lblError = AddLabel("", PageMargin, 0, W - PageMargin * 2, 44, color: Colors.Error);
+        _lblWarn = AddLabel("", PageMargin, 0, W - PageMargin * 2, 40, color: Colors.Warning);
 
         QuotaSection("5h 积分", out _lbl5h, out _lbl5hPct, out _bar5h, out _lbl5hDetail);
         QuotaSection("周积分", out _lblWeek, out _lblWeekPct, out _barWeek, out _lblWeekDetail);
@@ -127,6 +129,7 @@ sealed class DetailForm : Form
 
         // 数据区块初始全部隐藏：加载中只显示标题，首刷后填充
         _lblError.Visible = false;
+        _lblWarn.Visible = false;
         _lbl5h.Visible = _lbl5hPct.Visible = _bar5h.Visible = _lbl5hDetail.Visible = false;
         _lblWeek.Visible = _lblWeekPct.Visible = _barWeek.Visible = _lblWeekDetail.Visible = false;
         _lblMcp.Visible = _lblMcpPct.Visible = _barMcp.Visible = _lblMcpDetail.Visible = false;
@@ -144,6 +147,7 @@ sealed class DetailForm : Form
         {
             new() { Rows = { Rw(26, _lblTitle, _lblLevel) } },
             new() { Rows = { Rw(44, _lblError) } },
+            new() { Rows = { new Row { Controls = new Control[] { _lblWarn }, Height = () => _lblWarn.Height } } },
             new() { Rows = { Rw(24, _lbl5h, _lbl5hPct), Rw(12, _bar5h), Rw(20, _lbl5hDetail) } },
             new() { Rows = { Rw(24, _lblWeek, _lblWeekPct), Rw(12, _barWeek), Rw(20, _lblWeekDetail) } },
             new() { Rows = { Rw(24, _lblMcp, _lblMcpPct), Rw(12, _barMcp), Rw(20, _lblMcpDetail) } },
@@ -218,6 +222,16 @@ sealed class DetailForm : Form
     }
 
     static string Truncate(string s, int max) => s.Length <= max ? s : s[..max] + "…";
+
+    /// <summary>启动期警告（如 relay 启动失败/禁用态）接入详情窗（M4）。</summary>
+    public void SetWarnings(IReadOnlyList<string> warnings)
+    {
+        var text = string.Join(Environment.NewLine, warnings);
+        _lblWarn.Visible = text.Length > 0;
+        _lblWarn.Text = text;
+        _lblWarn.Height = Math.Max(20, warnings.Count * 20);
+        Relayout();
+    }
 
     /// <summary>更新「模型中转」分组（随刷新节流调用）；null = relay 未运行，整块隐藏。</summary>
     public void UpdateRelay(RelayStatus? st)

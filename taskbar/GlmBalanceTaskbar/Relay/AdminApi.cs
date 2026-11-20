@@ -86,10 +86,11 @@ public sealed class AdminApi
             if (ids == null) { await WriteAsync(rsp, 400, "{\"error\":\"缺少 ids 数组\"}").ConfigureAwait(false); return; }
 
             var discovered = await DiscoverAllAsync().ConfigureAwait(false);
-            var existing = new HashSet<string>(_mgr.Pool.Select(rt => rt.Id), StringComparer.Ordinal);
             var added = new List<string>();
             var skipped = new List<string>();
-            var nextPriority = _mgr.Pool.Count > 0 ? _mgr.Pool.Max(rt => rt.Config.Priority) + 1 : 1;
+            var snapshot = _mgr.ProvidersSnapshot();
+            var existing = new HashSet<string>(snapshot.Select(p => p.Id), StringComparer.Ordinal);
+            var nextPriority = snapshot.Count > 0 ? snapshot.Max(p => p.Priority) + 1 : 1;
             foreach (var node in ids)
             {
                 var fullId = node?.ToString() ?? "";
@@ -110,7 +111,7 @@ public sealed class AdminApi
                     Models = hit.Models?.ToList() ?? new List<string>(),
                     Enabled = true,
                 };
-                _mgr.Options.Providers.Add(pc);
+                _mgr.MutateProviders(list => { list.Add(pc); return true; });
                 existing.Add(id);
                 added.Add(id);
             }
@@ -119,7 +120,7 @@ public sealed class AdminApi
                 await WriteAsync(rsp, 200, RelayJson.Serialize(new { ok = true, added, skipped, message = "没有可导入的新渠道" })).ConfigureAwait(false);
                 return;
             }
-            var okWrite = _mgr.PersistAndApply(relay => ReplaceProviders(relay, _mgr.Options), warnings);
+            var okWrite = _mgr.PersistAndApply(relay => ReplaceProviders(relay, _mgr.ProvidersSnapshot()), warnings);
             await WriteAsync(rsp, okWrite ? 200 : 500,
                 RelayJson.Serialize(new { ok = okWrite, added, skipped, warnings })).ConfigureAwait(false);
             return;
@@ -146,10 +147,13 @@ public sealed class AdminApi
                 ApplyProviderPatch(pc, body);
                 pc.Id = providerId;
 
-                // 内存同步更新（ApplyOptions 依此重建池），再写回配置文件
-                var list = _mgr.Options.Providers;
-                var pi = list.FindIndex(p => string.Equals(p.Id, providerId, StringComparison.Ordinal));
-                if (pi >= 0) list[pi] = pc; else list.Add(pc);
+                // 内存同步更新（ApplyOptions 依此重建池），再写回配置文件（F6：串行化）
+                _mgr.MutateProviders(list =>
+                {
+                    var i2 = list.FindIndex(p => string.Equals(p.Id, providerId, StringComparison.Ordinal));
+                    if (i2 >= 0) list[i2] = pc; else list.Add(pc);
+                    return true;
+                });
 
                 Func<JsonObject, JsonObject> mutate = relay =>
                 {
@@ -162,8 +166,13 @@ public sealed class AdminApi
                 var ok = _mgr.PersistAndApply(mutate, warnings);
                 if (ok)
                 {
-                    // 配置修正（如 baseURL/key 改回）后该渠道立即重新参与路由（不沿用旧冷却）
-                    _mgr.Pool.FirstOrDefault(p => string.Equals(p.Id, providerId, StringComparison.Ordinal))?.ForceReevaluate();
+                    // 配置修正后：非冷却渠道立即重新参与路由；冷却中的渠道保留冷却，
+                    // 到期惰性归位时经 RefreshKey 重解析新配置（H1-F2：避免持旧 key 归位）
+                    var fresh = _mgr.Pool.FirstOrDefault(p => string.Equals(p.Id, providerId, StringComparison.Ordinal));
+                    if (fresh != null && fresh.Inspect(DateTimeOffset.Now).State != ProviderState.Cooldown)
+                    {
+                        fresh.ForceReevaluate();
+                    }
                 }
                 await WriteAsync(rsp, ok ? 200 : 500,
                     RelayJson.Serialize(new { ok, created = isNew, warnings, message = ok ? (isNew ? "已新建并生效" : "已更新并生效") : "写回失败" })).ConfigureAwait(false);
@@ -173,8 +182,8 @@ public sealed class AdminApi
             case "" when method == "DELETE":
             {
                 if (rt == null) { await WriteAsync(rsp, 404, "{\"error\":\"渠道不存在\"}").ConfigureAwait(false); return; }
-                _mgr.Options.Providers.RemoveAll(p => p.Id == rt.Id);
-                var ok = _mgr.PersistAndApply(relay => ReplaceProviders(relay, _mgr.Options), warnings);
+                _mgr.MutateProviders(list => list.RemoveAll(p => p.Id == rt.Id) > 0);
+                var ok = _mgr.PersistAndApply(relay => ReplaceProviders(relay, _mgr.ProvidersSnapshot()), warnings);
                 await WriteAsync(rsp, ok ? 200 : 500,
                     RelayJson.Serialize(new { ok, warnings, message = ok ? $"已删除 {rt.Id} 并生效" : "写回失败" })).ConfigureAwait(false);
                 return;
@@ -184,16 +193,21 @@ public sealed class AdminApi
             {
                 var body = await ReadJsonAsync(req).ConfigureAwait(false);
                 var dir = body?["dir"]?.ToString() ?? "up";
-                var ordered = _mgr.Options.Providers.OrderBy(p => p.Priority).ToList();
-                var idx = ordered.FindIndex(p => p.Id == providerId);
-                var swapWith = dir == "up" ? idx - 1 : idx + 1;
-                if (idx < 0 || swapWith < 0 || swapWith >= ordered.Count)
+                var moved = _mgr.MutateProviders(list =>
+                {
+                    var ordered = list.OrderBy(p => p.Priority).ToList();
+                    var idx = ordered.FindIndex(p => p.Id == providerId);
+                    var swapWith = dir == "up" ? idx - 1 : idx + 1;
+                    if (idx < 0 || swapWith < 0 || swapWith >= ordered.Count) return false;
+                    (ordered[idx].Priority, ordered[swapWith].Priority) = (ordered[swapWith].Priority, ordered[idx].Priority);
+                    return true;
+                });
+                if (!moved)
                 {
                     await WriteAsync(rsp, 200, RelayJson.Serialize(new { ok = true, message = "已在边界，无需移动" })).ConfigureAwait(false);
                     return;
                 }
-                (ordered[idx].Priority, ordered[swapWith].Priority) = (ordered[swapWith].Priority, ordered[idx].Priority);
-                var ok = _mgr.PersistAndApply(relay => ReplaceProviders(relay, _mgr.Options), warnings);
+                var ok = _mgr.PersistAndApply(relay => ReplaceProviders(relay, _mgr.ProvidersSnapshot()), warnings);
                 await WriteAsync(rsp, ok ? 200 : 500, RelayJson.Serialize(new { ok, warnings })).ConfigureAwait(false);
                 return;
             }
@@ -363,7 +377,14 @@ public sealed class AdminApi
         if (body["probe"] is JsonNode pb) pc.Probe = pb.ToString()!;
         if (body["baseURL"] is JsonNode bu) pc.BaseUrl = bu.ToString()!;
         if (body["baseUrl"] is JsonNode bu2) pc.BaseUrl = bu2.ToString()!;
-        if (body["apiKey"] is JsonNode ak) pc.ApiKey = ak.ToString()!; // 只写不读
+        if (body["apiKey"] is JsonNode ak)
+        {
+            var key = ak.ToString() ?? "";
+            // M3：掩码形态视为"未修改"，保留原 key 不覆盖，防 GET→PUT 回环把掩码写成真 key。
+            // 除标准掩码（含 U+2026 省略号）外，兼容传输中省略号被损坏的形态：
+            // "sk-?" + 恰好 4 位尾巴 且与当前 key 尾 4 位一致（真实 key 远长于 8 字符，误伤可忽略）。
+            if (!IsMaskedKey(key, pc.ApiKey)) pc.ApiKey = key;
+        }
         if (body["models"] is JsonArray ms)
         {
             pc.Models = ms.Where(m => m != null).Select(m => m!.ToString()).Where(s => s.Length > 0).ToList();
@@ -371,7 +392,27 @@ public sealed class AdminApi
         if (body["enabled"] is JsonNode en) pc.Enabled = en.GetValue<bool>();
     }
 
-    int NextPriority() => _mgr.Pool.Count > 0 ? _mgr.Pool.Max(rt => rt.Config.Priority) + 1 : 1;
+    internal static bool IsMaskedKey(string incoming, string original)
+    {
+        if (string.IsNullOrEmpty(incoming)) return false;
+        if (incoming.Contains('…')) return true; // 标准掩码：sk-…后4位
+        // 损坏变体：短串（≤9）以 "sk-" 开头、含一个非字母数字占位符、尾 4 位与当前 key 尾 4 位一致
+        if (incoming.Length is >= 7 and <= 9 && incoming.StartsWith("sk-", StringComparison.Ordinal))
+        {
+            var tail = incoming[^4..];
+            var mid = incoming[3..^4];
+            var originalTail = original.Length >= 4 ? original[^4..] : original;
+            var midIsPlaceholder = mid.Length == 1 && !char.IsLetterOrDigit(mid[0]);
+            return midIsPlaceholder && tail == originalTail;
+        }
+        return false;
+    }
+
+    int NextPriority()
+    {
+        var snapshot = _mgr.ProvidersSnapshot();
+        return snapshot.Count > 0 ? snapshot.Max(p => p.Priority) + 1 : 1;
+    }
 
     static ProviderConfig CloneConfig(ProviderConfig p) => new()
     {
@@ -395,9 +436,9 @@ public sealed class AdminApi
         return arr;
     }
 
-    static JsonObject ReplaceProviders(JsonObject relayRoot, RelayOptions opts)
+    static JsonObject ReplaceProviders(JsonObject relayRoot, List<ProviderConfig> providers)
     {
-        relayRoot["providers"] = new JsonArray(opts.Providers.Select(p => p.ToJsonNode()).ToArray());
+        relayRoot["providers"] = new JsonArray(providers.Select(p => p.ToJsonNode()).ToArray());
         return relayRoot;
     }
 

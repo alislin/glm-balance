@@ -42,6 +42,7 @@ sealed class AppContext : ApplicationContext
             relay.Start(cfg.Warnings); // 失败原因写入 cfg.Warnings（详情窗可见）；实例保留供状态展示与 Dispose
             _relay = relay;
         }
+        _form.SetWarnings(cfg.Warnings); // M4：启动期警告（含 relay 启动失败）在详情窗可见
 
         // 系统托盘：动态数字图标（不设置 Text，避免与自绘多行摘要浮窗重叠出现两个 tooltip）
         _tray = new NotifyIcon

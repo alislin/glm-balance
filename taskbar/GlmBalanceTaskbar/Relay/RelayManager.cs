@@ -14,6 +14,9 @@ public sealed class RelayManager : IDisposable
     readonly string _configPath;
     readonly object _persistLock = new();
     readonly object _probeLock = new();
+    readonly object _providersLock = new(); // F6：providers 池配置的读写锁（AdminApi 写操作与快照读）
+    readonly object _statsLock = new();     // F5：今日计数与日期翻转
+    readonly object _snapshotLock = new();
 
     ChannelRouter _router = new();
     RequestLog _log = new();
@@ -55,15 +58,28 @@ public sealed class RelayManager : IDisposable
 
     UsageSnapshot? _lastSnap;
 
-    /// <summary>构建渠道池：解析实际 key（provider 显式 key 优先，空则复用全局读取链）。</summary>
+    /// <summary>key 解析规则（H1-F2/M1）：provider 显式 key 优先；仅 zhipu 域渠道或 zhipu-monitor 探测渠道允许回落全局读取链（该链是智谱定向的），否则视为无 key。</summary>
+    internal string? ResolveKey(ProviderConfig p)
+    {
+        var explicitKey = NonEmpty(p.ApiKey);
+        if (explicitKey != null) return explicitKey;
+        var isZhipuHost = NonEmpty(p.BaseUrl) is { } url &&
+            Uri.TryCreate(url, UriKind.Absolute, out var u) &&
+            (u.Host.Contains("bigmodel.cn", StringComparison.OrdinalIgnoreCase) ||
+             u.Host.Contains("z.ai", StringComparison.OrdinalIgnoreCase) ||
+             u.Host.EndsWith("bigmodel.cn", StringComparison.OrdinalIgnoreCase));
+        var isZhipuProbe = string.Equals(p.Probe?.Trim(), "zhipu-monitor", StringComparison.OrdinalIgnoreCase);
+        return (isZhipuHost || isZhipuProbe) ? NonEmpty(_cfg.ApiKey) : null;
+    }
+
+    /// <summary>构建渠道池：解析实际 key（含回退规则），并注入归位重解析委托。</summary>
     List<ProviderRuntime> BuildPool()
     {
         var pool = new List<ProviderRuntime>();
         foreach (var p in _opts.Providers)
         {
-            var rt = new ProviderRuntime(p, _opts);
-            var key = NonEmpty(p.ApiKey) ?? NonEmpty(_cfg.ApiKey);
-            rt.SetResolvedKey(key);
+            var rt = new ProviderRuntime(p, _opts, ResolveKey);
+            rt.SetResolvedKey(ResolveKey(p));
             pool.Add(rt);
         }
         return pool;
@@ -184,14 +200,23 @@ public sealed class RelayManager : IDisposable
 
     // ─────────────────────────── 状态快照（UI / status / admin 共读） ───────────────────────────
 
-    public RelayStatus Snapshot()
+    /// <summary>日期翻转时清零今日计数（F5：加锁，与请求线程并发安全）。</summary>
+    void RollDateIfNeeded_Locked(DateTimeOffset now)
     {
-        var now = DateTimeOffset.Now;
         if (now.Date != _statsDate.Date)
         {
             _todayRequests = 0;
             _todayFailovers = 0;
             _statsDate = now.Date;
+        }
+    }
+
+    public RelayStatus Snapshot()
+    {
+        var now = DateTimeOffset.Now;
+        lock (_statsLock)
+        {
+            RollDateIfNeeded_Locked(now);
         }
         var pool = _router.Pool();
         var providers = pool.Select(rt =>
@@ -216,11 +241,16 @@ public sealed class RelayManager : IDisposable
         }).ToList();
 
         var current = Running ? _router.Current(now)?.Id : null;
+        long req, fail;
+        lock (_statsLock)
+        {
+            req = _todayRequests;
+            fail = _todayFailovers;
+        }
         return new RelayStatus(
             Running, _opts.Enabled, _opts.Port, current, _startedAt,
             _startedAt is { } st ? (now - st).TotalSeconds : 0,
-            Interlocked.Read(ref _todayRequests),
-            Interlocked.Read(ref _todayFailovers),
+            req, fail,
             _authDisabled, false,
             providers, _router.ModelUnion());
     }
@@ -229,11 +259,22 @@ public sealed class RelayManager : IDisposable
 
     // ─────────────────────────── 统计与日志 ───────────────────────────
 
-    internal void CountFailover() => Interlocked.Increment(ref _todayFailovers);
+    internal void CountFailover()
+    {
+        lock (_statsLock)
+        {
+            RollDateIfNeeded_Locked(DateTimeOffset.Now);
+            _todayFailovers++;
+        }
+    }
 
     internal void RecordRequest(string model, List<string> chain, int? status, long elapsedMs, string? error)
     {
-        Interlocked.Increment(ref _todayRequests);
+        lock (_statsLock)
+        {
+            RollDateIfNeeded_Locked(DateTimeOffset.Now);
+            _todayRequests++;
+        }
         try
         {
             _log.Add(new RequestLogEntry(DateTimeOffset.Now, model,
@@ -306,13 +347,16 @@ public sealed class RelayManager : IDisposable
 
     // ─────────────────────────── 托盘/详情窗摘要 ───────────────────────────
 
-    /// <summary>托盘悬停"中转"行：正常 / 异常 / degraded / 已关闭。</summary>
+    /// <summary>托盘悬停"中转"行：正常 / 异常 / degraded / 已关闭。已停用与 no-key 渠道不参与首选通道判定（F10）。</summary>
     public string PreviewLine()
     {
         if (!Running) return "中转  已关闭";
         var now = DateTimeOffset.Now;
         var pool = _router.Pool();
-        var preferred = pool.OrderBy(rt => rt.Config.Priority).FirstOrDefault();
+        var preferred = pool
+            .Where(rt => rt.Config.Enabled && rt.ResolvedKey != null)
+            .OrderBy(rt => rt.Config.Priority)
+            .FirstOrDefault();
         var current = _router.Current(now);
         if (current == null) return "中转  无可用渠道";
         if (preferred != null && preferred.Id != current.Id)
@@ -340,6 +384,24 @@ public sealed class RelayManager : IDisposable
     // ─────────────────────────── admin 支撑 ───────────────────────────
 
     public List<ProviderRuntime> Pool => _router.Pool();
+
+    /// <summary>providers 配置快照（F6：锁内读取，元素为共享引用）。</summary>
+    public List<ProviderConfig> ProvidersSnapshot()
+    {
+        lock (_providersLock)
+        {
+            return _opts.Providers.ToList();
+        }
+    }
+
+    /// <summary>providers 配置变更（F6：串行化 AdminApi 的写操作）。action 返回是否发生实际变更。</summary>
+    public bool MutateProviders(Func<List<ProviderConfig>, bool> action)
+    {
+        lock (_providersLock)
+        {
+            return action(_opts.Providers);
+        }
+    }
 
     /// <summary>聚合全部智能体配置源的发现结果。</summary>
     public async Task<IReadOnlyList<DiscoveredProvider>> DiscoverAsync(CancellationToken ct = default)
@@ -372,7 +434,9 @@ public sealed class RelayManager : IDisposable
         new PiDeployer(),
     };
 
-    /// <summary>测试连接：GET {baseURL}/models（10s 超时）。</summary>
+    /// <summary>测试连接：GET {baseURL}/models（10s 超时；共享静态 client，F7）。</summary>
+    static readonly HttpClient TestClient = new() { Timeout = TimeSpan.FromSeconds(10) };
+
     public async Task<(bool Ok, string Message)> TestProviderAsync(ProviderRuntime rt, CancellationToken ct)
     {
         var key = rt.ResolvedKey;
@@ -380,10 +444,9 @@ public sealed class RelayManager : IDisposable
         var url = rt.Config.BaseUrl.TrimEnd('/') + "/models";
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
             req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + key);
-            using var res = await http.SendAsync(req, ct).ConfigureAwait(false);
+            using var res = await TestClient.SendAsync(req, ct).ConfigureAwait(false);
             return (int)res.StatusCode switch
             {
                 200 => (true, "连接成功"),

@@ -306,7 +306,7 @@ public sealed class RelayServer : IDisposable
             try
             {
                 contentType = res.Content.Headers.ContentType?.ToString();
-                errText = Trunc(await res.Content.ReadAsStringAsync(ct).ConfigureAwait(false), 300);
+                errText = await res.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             }
             catch
             {
@@ -314,9 +314,13 @@ public sealed class RelayServer : IDisposable
             }
             res.Dispose();
 
-            if (status is 429 or 402 or 403) return UpstreamOutcome.Quota(status, errText);
-            if (status >= 500) return UpstreamOutcome.Server(status, errText);
-            return UpstreamOutcome.Client(status, errText, contentType);
+            if (status is 401 or 429 or 402 or 403) // 401 鉴权失效属渠道级失效（arch 裁决 H1），与 403 同类：转移 + 硬冷却
+            {
+                var reason = status == 401 ? "鉴权失效（HTTP 401）" : Trunc(errText, 300);
+                return UpstreamOutcome.Quota(status, reason);
+            }
+            if (status >= 500) return UpstreamOutcome.Server(status, Trunc(errText, 300));
+            return UpstreamOutcome.Client(status, errText, contentType); // 4xx 业务错：原样透传不截断（M2）
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
