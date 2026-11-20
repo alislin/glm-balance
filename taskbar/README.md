@@ -104,6 +104,127 @@ OK
 | 固定按钮显示静态 `G`（运行中也不变） | 旧固定快捷方式缺少 AUMID：取消固定 → 启动最新版 → 从运行中的任务栏按钮重新固定 |
 | 图标数字显示不全/异常 | 确认运行的是最新构建（`bin\Release\net10.0-windows\` 或重新 publish 的 `win-x64\publish\`）；可用 `GlmBalanceTaskbar.exe --dump-icon` 把各尺寸渲染帧导出到 `%TEMP%\glmbalance-icon\` 排查 |
 
+## 模型中转（relay）
+
+在任务栏程序内内嵌**本机 OpenAI 兼容中转服务**：opencode 等 OpenAI 兼容客户端把 baseURL 指向 `http://127.0.0.1:8787/v1`，请求按渠道优先级转发到智谱 Coding / 自定义中转 等上游，配额耗尽或出错时自动失败转移。
+
+```
+opencode (localrelay provider) ──http://127.0.0.1:8787/v1──▶ GlmBalanceTaskbar.exe
+    ├─ 原有：AppContext 30s 配额轮询 → 任务栏图标 / 托盘浮窗 / 详情窗口（不改动其语义）
+    └─ RelayManager：RelayServer（HttpListener）+ ChannelRouter（优先级 + 三态状态机）
+         + 探测（IUsageProbe：zhipu-monitor / none）+ 请求日志 + 配置持久化
+```
+
+技术约束：零新 NuGet 依赖（HttpListener/HttpClient 内置）；仅监听本机回环 `127.0.0.1`；`PublishSingleFile` 与"仅 Desktop Runtime"承诺不变。
+
+### 启用方式
+
+在 **exe 同目录** `glmbalance-taskbar.json` 中加入 `relay` 段（该段整体缺省 → 中转关闭，原功能零影响）：
+
+```jsonc
+{
+  // 原有字段全部保留不动
+  "relay": {
+    "enabled": true,
+    "port": 8787,
+    "localToken": "",                    // 空 → 首启生成随机 token（32 字节 hex）写回本文件
+    "probeIntervalSeconds": 60,
+    "degradeBelowPct": 5,                // 探测剩余 % 低于此值 → degraded（软降级，不参与路由）
+    "restoreAbovePct": 10,               // 高于此值（或窗口重置）→ 恢复（滞后防抖）
+    "cooldown": { "quotaSeconds": 300, "errorThreshold": 3, "errorSeconds": 60 },
+    "providers": [                       // 缺失或空 → 自动播种下面两项并写回
+      { "id": "zhipu-coding", "name": "智谱 Coding", "priority": 1, "probe": "zhipu-monitor",
+        "baseURL": "https://open.bigmodel.cn/api/coding/paas/v4",
+        "apiKey": "",                    // 空 → 复用全局 apiKey 读取链（auth.json 优先 zhipuai-coding-plan）
+        "models": ["glm-5.3-flash", "glm-5.3"], "enabled": true },
+      { "id": "custom-relay", "name": "自定义中转", "priority": 2, "probe": "none",
+        "baseURL": "https://your-relay.example.com/v1",
+        "apiKey": "<你的 custom-relay key>",
+        "models": ["glm-5.3-flash", "glm-5.3"], "enabled": true }
+    ],
+    "agents": { "pi": { "configPath": "" } }
+  }
+}
+```
+
+> 注意：配置文件为**严格 JSON**（不支持注释），上例 `jsonc` 注释仅为说明。
+
+### relay 配置字段表
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `relay.enabled` | `true`（段存在时） | 中转总开关；`relay` 段整体缺省 = 关闭 |
+| `relay.port` | `8787` | 监听端口（仅 `127.0.0.1`）；改动需重启程序 |
+| `relay.localToken` | 空=自动生成 | Bearer 鉴权 token；写回失败 → 警告并**免鉴权运行** |
+| `relay.probeIntervalSeconds` | `60` | 每 provider 探测间隔（10–3600 钳制） |
+| `relay.degradeBelowPct` / `restoreAbovePct` | `5` / `10` | 探测驱动的软降级阈值（滞后防抖） |
+| `relay.cooldown.quotaSeconds` | `300` | 上游 `429/402/403` 硬冷却时长（秒） |
+| `relay.cooldown.errorThreshold` / `errorSeconds` | `3` / `60` | 5xx/网络异常连续 N 次冷却 M 秒 |
+| `relay.providers[].priority` | — | 升序优先（默认优先，用量还有就优先）；平序按配置数组顺序 |
+| `relay.providers[].probe` | `none` | `zhipu-monitor`（quota/limit 探测，优先复用任务栏轮询快照）/ `none`（不可检查，纯反应式） |
+| `relay.providers[].apiKey` | 空 | 空 → 复用全局读取链；空 key 的渠道 = `disabled(no-key)` 不参与路由 |
+| `relay.agents.pi.configPath` | 空 | Pi 配置路径（占位预留） |
+
+### 渠道状态机
+
+- **normal**：参与路由。
+- **cooldown**（硬，响应驱动）：上游 `429/402/403` → 300s；`5xx`/网络异常连续 ≥3 次 → 60s；成功一次清零计数。时间戳实现，无定时器。
+- **degraded**（软，探测驱动）：剩余 % 低于 `degradeBelowPct` → 降级（不参与路由）；高于 `restoreAbovePct` 或窗口重置 → 恢复。
+- 探测失败/不可检查 → 不改状态仅记错误；**反应式信号始终兜底**（配额 API 正常但请求仍 429/402/403 → 照进硬冷却）。
+- 失败转移仅发生在未向客户端写入任何字节前；429/402/403/5xx/网络异常切下一渠道，4xx 业务错原样回传不转移；全部渠道失败 → `502` 错误汇总。
+- 流式（SSE）逐块转发 + flush，idle 120s 无 chunk 才断（断流不重试）。
+
+### HTTP 端点
+
+| 端点 | 鉴权 | 说明 |
+| --- | --- | --- |
+| `POST /v1/chat/completions` | Bearer localToken | OpenAI 兼容转发（请求体原样透传，不重序列化） |
+| `GET /v1/models` | Bearer localToken | 池内 Enabled 渠道 models 并集（OpenAI 格式） |
+| `GET /health` | 免 | `{"status":"ok"}` |
+| `GET /status` | 免（仅本机回环） | 渠道状态 JSON（state/lastError/lastUsed/冷却剩余/计数/用量% + current） |
+| `GET /admin` | 免 | 管理面板（五 Tab：总览 / Provider 池 / 日志 / 部署 / 设置） |
+| `/api/*` | Bearer localToken | 管理 JSON API（provider CRUD / move / test / import、agents deploy、settings、logs；key 只写不读，响应一律掩码） |
+
+### opencode 对接
+
+1. 启动程序后打开管理面板（托盘菜单「管理面板」或 `http://127.0.0.1:8787/admin`），在「部署」Tab 生成预览并写入；或在「Provider 池」Tab 从发现列表核对渠道。
+2. 写入效果（`~/.config/opencode/opencode.json`，自动备份 `opencode.json.bak-<时间戳>`，**绝不改动既有 provider 条目**）：
+
+```jsonc
+{
+  "model": "localrelay/glm-5.3-flash",   // 「设为全局默认」勾选时写入
+  "provider": {
+    "localrelay": {
+      "name": "Local Relay",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "http://127.0.0.1:8787/v1", "apiKey": "<localToken>" },
+      "models": { "glm-5.3-flash": { "name": "glm-5.3-flash" }, "glm-5.3": { "name": "glm-5.3" } }
+    }
+  }
+}
+```
+
+3. 验证：`opencode run -m localrelay/glm-5.3-flash "回复ok两个字"`。
+4. 重置 localToken（设置 Tab）后必须**同步重新部署** opencode 端，否则请求 401。
+
+### 故障排查
+
+| 现象 | 处理 |
+| --- | --- |
+| 详情窗提示"中转服务启动失败（端口 8787）" | 端口被占用：改 `relay.port` 或释放占用进程；配额显示不受影响 |
+| 请求 401 invalid_api_key | localToken 与 opencode 端 localrelay apiKey 不一致：重新部署或同步 token |
+| `502 中转失败：所有可用渠道均失败` | 打开 `/status` 看各渠道 lastError；常为上游 key 失效或全部冷却 |
+| 渠道一直 normal 但请求 429 | 该渠道 probe=`none`（不可检查）：属预期，反应式兜底会在首个 429 后进冷却 |
+| 托盘悬停"中转  无可用渠道" | 所有渠道 disabled / no-key / degraded / cooldown；检查 providers 配置 |
+| 管理面板 401 | 首次打开会提示输入 token（exe 同目录 json 的 `relay.localToken`） |
+
+### 红线说明
+
+- apiKey 只写不读：任何 API 响应、`/status`、日志中 key 一律掩码（`sk-…后4位`）；不把明文 key 写进 git 仓库内任何文件。
+- 发现/部署功能**绝不删除或修改** opencode.json 中既有 provider 条目（`zhipuai-coding-plan` 与 `custom-relay` 是插件与 relay 取 key 的共同数据源）。
+- 配置写回只有一条路径（JsonNode 合并写回 `glmbalance-taskbar.json`，保留文件其他字段）。
+- 中转仅监听本机回环；日志与错误汇总不含请求体内容。
+
 ## 隐私
 
 与插件一致：直接从本机请求智谱官方 API，apiKey 仅用于向智谱 API 鉴权，不经过任何第三方。

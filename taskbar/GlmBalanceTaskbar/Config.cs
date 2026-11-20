@@ -14,6 +14,8 @@ public sealed class AppConfig
     public int IntervalSeconds { get; set; } = 30;
     public bool Activity { get; set; } = true;
     public int ActivityType { get; set; } = 3;
+    /// <summary>中转配置段；null = "relay" 缺省或解析失败（中转关闭，原功能零影响）。</summary>
+    public RelayOptions? Relay { get; set; }
     public List<string> Warnings { get; } = new();
 
     /// <summary>
@@ -52,6 +54,9 @@ public sealed class AppConfig
                 if (r.Prop("activityType").Num() is { } at) { cfg.ActivityType = (int)at; ovActivityType = true; }
                 ovBase = NonEmpty(r.Prop("monitorBase").Str());
                 ovBaseSet = ovBase != null;
+
+                // relay 段：整体缺省 → null（中转关闭）；解析失败 → warnings + 中转关闭
+                cfg.Relay = RelayOptions.Parse(r, cfg.Warnings);
             }
         }
 

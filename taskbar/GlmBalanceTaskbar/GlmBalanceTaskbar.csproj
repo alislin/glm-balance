@@ -15,4 +15,9 @@
     <PublishSingleFile>true</PublishSingleFile>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- 中转管理面板（单页，无构建链）嵌入 exe -->
+    <EmbeddedResource Include="Relay\admin.html" />
+  </ItemGroup>
+
 </Project>

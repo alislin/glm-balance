@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GlmBalance 中转管理面板</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1d2026; --line: #2e323b; --text: #e6e8ec; --muted: #8b909c;
+    --accent: #4f8cff; --ok: #3fb96b; --warn: #d9a441; --bad: #e05d5d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; }
+  header { padding: 14px 20px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  nav { display: flex; gap: 4px; padding: 10px 20px 0; border-bottom: 1px solid var(--line); }
+  nav button { background: none; border: none; color: var(--muted); padding: 8px 16px; cursor: pointer; font: inherit; border-bottom: 2px solid transparent; }
+  nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+  main { padding: 18px 20px 60px; max-width: 1080px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-bottom: 14px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .kpi { min-width: 140px; flex: 1; }
+  .kpi .v { font-size: 22px; font-weight: 600; }
+  .kpi .k { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; white-space: nowrap; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+  .badge.normal { background: rgba(63,185,107,.15); color: var(--ok); }
+  .badge.cooldown { background: rgba(224,93,93,.15); color: var(--bad); }
+  .badge.degraded { background: rgba(217,164,65,.15); color: var(--warn); }
+  .badge.no-key { background: rgba(139,144,156,.15); color: var(--muted); }
+  .badge.off { background: rgba(139,144,156,.15); color: var(--muted); }
+  button.act { background: var(--panel); border: 1px solid var(--line); color: var(--text); border-radius: 6px; padding: 4px 12px; cursor: pointer; font-size: 12px; }
+  button.act:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { border-color: var(--bad); color: var(--bad); }
+  input, select, textarea { background: #171a20; border: 1px solid var(--line); color: var(--text); border-radius: 6px; padding: 6px 10px; font: inherit; }
+  input[type=text], input[type=number] { width: 220px; }
+  textarea { width: 100%; min-height: 130px; font-family: Consolas, monospace; font-size: 12px; white-space: pre; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .err { color: var(--bad); font-size: 12px; white-space: pre-wrap; }
+  .ok-msg { color: var(--ok); font-size: 12px; white-space: pre-wrap; }
+  .modal { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; z-index: 10; }
+  .modal .box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 22px; width: 420px; }
+  .modal h3 { margin: 0 0 10px; font-size: 15px; }
+  .grid2 { display: grid; grid-template-columns: 130px 1fr; gap: 8px 12px; align-items: center; margin: 10px 0; }
+  pre.log { margin: 0; font-family: Consolas, monospace; font-size: 12px; line-height: 1.7; white-space: pre-wrap; }
+  .hidden { display: none !important; }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; width: 110px; display: inline-block; vertical-align: middle; }
+  .bar i { display: block; height: 100%; background: var(--ok); }
+</style>
+</head>
+<body>
+<header>
+  <h1>模型中转 · 管理面板</h1>
+  <span class="sub" id="hd-info">…</span>
+  <span style="flex:1"></span>
+  <span class="sub" id="hd-token-state"></span>
+  <button class="act" onclick="askToken(true)">更换 Token</button>
+</header>
+<nav id="tabs">
+  <button data-tab="overview" class="active">总览</button>
+  <button data-tab="providers">Provider 池</button>
+  <button data-tab="logs">日志</button>
+  <button data-tab="deploy">部署</button>
+  <button data-tab="settings">设置</button>
+</nav>
+<main>
+
+<!-- ── 总览 ── -->
+<section id="tab-overview">
+  <div class="card row">
+    <div class="kpi"><div class="k">当前通道</div><div class="v" id="ov-current">–</div></div>
+    <div class="kpi"><div class="k">运行时长</div><div class="v" id="ov-uptime">–</div></div>
+    <div class="kpi"><div class="k">今日请求数</div><div class="v" id="ov-req">–</div></div>
+    <div class="kpi"><div class="k">今日转移次数</div><div class="v" id="ov-failover">–</div></div>
+  </div>
+  <div id="ov-cards"></div>
+</section>
+
+<!-- ── Provider 池 ── -->
+<section id="tab-providers" class="hidden">
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <b>Provider 池（Priority 升序优先）</b>
+      <div class="row">
+        <button class="act" onclick="loadImport()">从发现导入</button>
+        <button class="act primary" onclick="editProvider(null)">+ 新建渠道</button>
+      </div>
+    </div>
+    <div id="pv-table" style="margin-top:10px"></div>
+    <div id="pv-msg"></div>
+  </div>
+</section>
+
+<!-- ── 日志 ── -->
+<section id="tab-logs" class="hidden">
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <b>最近请求（2 秒轮询；不含请求体内容）</b>
+      <button class="act" onclick="toggleLogPoll()">暂停 / 继续</button>
+    </div>
+    <pre class="log" id="log-body" style="margin-top:10px">加载中…</pre>
+  </div>
+</section>
+
+<!-- ── 部署 ── -->
+<section id="tab-deploy" class="hidden">
+  <div class="card">
+    <b>把本中转注册为智能体的 provider</b>
+    <div class="muted" style="margin:4px 0 10px">
+      写入前自动备份原配置（*.bak-时间戳）；绝不删除/修改既有 provider 条目。
+      opencode 端将新增 localrelay provider（baseURL 指向本机中转，apiKey=中转 token）。
+    </div>
+    <div id="dp-list"></div>
+    <div id="dp-msg"></div>
+  </div>
+</section>
+
+<!-- ── 设置 ── -->
+<section id="tab-settings" class="hidden">
+  <div class="card">
+    <b>运行参数</b>
+    <div class="grid2" style="margin-top:10px">
+      <span>端口</span><div class="row"><input type="number" id="st-port"><span class="muted">改动需重启程序生效</span></div>
+      <span>探测间隔（秒）</span><div><input type="number" id="st-probe"></div>
+      <span>降级阈值（剩余 %）</span><div class="row"><input type="number" id="st-degrade"><span class="muted">低于此值 → degraded</span></div>
+      <span>恢复阈值（剩余 %）</span><div class="row"><input type="number" id="st-restore"><span class="muted">高于此值 → 恢复（滞后防抖）</span></div>
+      <span>配额冷却（秒）</span><div><input type="number" id="st-quota"><span class="muted">429/402/403</span></div>
+      <span>错误冷却阈值（次）</span><div><input type="number" id="st-eth"><span class="muted">5xx/网络连续失败</span></div>
+      <span>错误冷却（秒）</span><div><input type="number" id="st-ets"></div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="act primary" onclick="saveSettings()">保存设置</button>
+      <button class="act danger" onclick="resetToken()">重置 Token（需同步重新部署）</button>
+    </div>
+    <div id="st-msg" style="margin-top:8px"></div>
+  </div>
+</section>
+
+</main>
+
+<!-- token 弹窗 -->
+<div class="modal hidden" id="token-modal">
+  <div class="box">
+    <h3>输入管理 Token</h3>
+    <div class="muted">token 在 exe 同目录 glmbalance-taskbar.json 的 relay.localToken（首启自动生成）；/api/* 与 /v1/* 均需 Bearer 鉴权。</div>
+    <input type="text" id="token-input" style="width:100%;margin:12px 0" placeholder="粘贴 localToken">
+    <div class="row" style="justify-content:flex-end">
+      <button class="act" onclick="closeModal()">取消</button>
+      <button class="act primary" onclick="saveToken()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- provider 编辑弹窗 -->
+<div class="modal hidden" id="pv-modal">
+  <div class="box" style="width:520px">
+    <h3 id="pv-title">编辑渠道</h3>
+    <div class="grid2">
+      <span>ID</span><input type="text" id="pv-id">
+      <span>名称</span><input type="text" id="pv-name">
+      <span>优先级</span><input type="number" id="pv-priority" value="10">
+      <span>探测类型</span><div class="row"><select id="pv-probe"><option value="zhipu-monitor">zhipu-monitor</option><option value="none">none</option></select><span class="muted">none = 不可检查，纯反应式</span></div>
+      <span>baseURL</span><input type="text" id="pv-base" style="width:340px">
+      <span>apiKey</span><div class="row"><input type="text" id="pv-key" style="width:280px" placeholder="留空 = 复用全局读取链"><span class="muted" id="pv-key-hint"></span></div>
+      <span>模型（逗号分隔）</span><input type="text" id="pv-models" style="width:340px">
+      <span>启用</span><input type="checkbox" id="pv-enabled" checked>
+    </div>
+    <div class="row" style="justify-content:flex-end;margin-top:12px">
+      <button class="act" onclick="closeModal()">取消</button>
+      <button class="act primary" onclick="saveProvider()">保存（写回配置并生效）</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ────────── token 管理 ──────────
+let TOKEN = localStorage.getItem("relay_token") || "";
+function hdrs() { return { "Authorization": "Bearer " + TOKEN }; }
+function askToken(force) {
+  if (force || !TOKEN) {
+    document.getElementById("token-input").value = TOKEN;
+    document.getElementById("token-modal").classList.remove("hidden");
+  }
+}
+function closeModal() {
+  document.getElementById("token-modal").classList.add("hidden");
+  document.getElementById("pv-modal").classList.add("hidden");
+}
+function saveToken() {
+  TOKEN = document.getElementById("token-input").value.trim();
+  localStorage.setItem("relay_token", TOKEN);
+  closeModal();
+  refreshAll();
+}
+document.getElementById("token-input").addEventListener("keydown", e => { if (e.key === "Enter") saveToken(); });
+
+// ────────── fetch 封装 ──────────
+async function api(path, opts) {
+  const res = await fetch(path, Object.assign({ headers: hdrs() }, opts));
+  if (res.status === 401) { askToken(true); throw new Error("未授权（401）"); }
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { /* ignore */ }
+  if (!res.ok) throw new Error((json && (json.error || json.message)) || text || ("HTTP " + res.status));
+  return json;
+}
+
+// ────────── Tab 切换 ──────────
+document.querySelectorAll("#tabs button").forEach(b => {
+  b.addEventListener("click", () => {
+    document.querySelectorAll("#tabs button").forEach(x => x.classList.toggle("active", x === b));
+    document.querySelectorAll("main > section").forEach(s => s.classList.toggle("hidden", s.id !== "tab-" + b.dataset.tab));
+    refreshAll();
+  });
+});
+const activeTab = () => document.querySelector("#tabs button.active").dataset.tab;
+
+// ────────── 总览 ──────────
+function fmtUptime(sec) {
+  sec = Math.floor(sec || 0);
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+const stateText = s => ({ normal: "正常", cooldown: "冷却", degraded: "降级", "no-key": "无 key" }[s] || s);
+function fmtTime(iso) { return iso ? new Date(iso).toLocaleTimeString("zh-CN", { hour12: false }) : "–"; }
+
+async function loadOverview() {
+  const ov = await api("/api/overview");
+  document.getElementById("ov-current").textContent = ov.currentId || "无可用渠道";
+  document.getElementById("ov-uptime").textContent = fmtUptime(ov.uptimeSec);
+  document.getElementById("ov-req").textContent = ov.todayRequests;
+  document.getElementById("ov-failover").textContent = ov.todayFailovers;
+  document.getElementById("hd-info").textContent =
+    `http://127.0.0.1:${ov.port}/v1 · ${ov.running ? "运行中" : "已停止"}${ov.authDisabled ? " · 免鉴权模式" : ""}`;
+  document.getElementById("hd-token-state").textContent = ov.authDisabled ? "⚠ token 写回失败，免鉴权" : "";
+
+  const cards = (ov.providers || []).map(p => {
+    let extra = "";
+    if (p.state === "cooldown") extra = `${p.cooldownReason || ""} · 剩余 ${p.cooldownRemainingSec}s`;
+    else if (p.state === "degraded") extra = p.degradedReason || "";
+    else if (p.state === "no-key") extra = "apiKey 为空且全局读取链无 key";
+    const pctBar = p.remainingPct != null
+      ? `<div class="bar"><i style="width:${Math.max(0, Math.min(100, p.remainingPct))}%;background:${p.remainingPct < 15 ? "var(--bad)" : p.remainingPct < 40 ? "var(--warn)" : "var(--ok)"}"></i></div> ${p.remainingPct}%`
+      : "–";
+    return `<div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div class="row">
+          <b>${p.id}</b>
+          <span class="badge ${p.state}">${stateText(p.state)}</span>
+          ${ov.currentId === p.id ? '<span class="muted">← 当前通道</span>' : ""}
+          ${p.enabled ? "" : '<span class="badge off">已停用</span>'}
+        </div>
+        <span class="muted">优先级 ${p.priority} · 探测 ${p.probe}</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span class="muted">用量</span>${pctBar}
+        <span class="muted">请求 ${p.requestCount} · 失败 ${p.failCount} · 平均 ${Math.round(p.avgLatencyMs)}ms</span>
+      </div>
+      ${extra ? `<div class="muted" style="margin-top:4px">${extra}</div>` : ""}
+      ${p.lastError ? `<div class="err" style="margin-top:4px">最后错误：${escapeHtml(p.lastError)}</div>` : ""}
+      <div class="muted" style="margin-top:4px">上次使用 ${fmtTime(p.lastUsedAt)} · 上次探测 ${fmtTime(p.lastProbeAt)}</div>
+    </div>`;
+  }).join("");
+  document.getElementById("ov-cards").innerHTML = cards || '<div class="card muted">渠道池为空</div>';
+}
+
+function escapeHtml(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+
+// ────────── Provider 池 ──────────
+async function loadProviders() {
+  const data = await api("/api/providers");
+  const list = data.providers || [];
+  const rows = list.map(p => `<tr>
+    <td>${p.id}<div class="muted">${escapeHtml(p.name || "")}</div></td>
+    <td>${p.priority}</td>
+    <td>${p.probe}</td>
+    <td class="muted" style="max-width:220px;word-break:break-all">${escapeHtml(p.baseURL)}</td>
+    <td class="muted">${p.apiKey ? escapeHtml(p.apiKey) : "（复用全局）"}</td>
+    <td class="muted">${(p.models || []).join(", ")}</td>
+    <td>${p.enabled ? '<span class="badge normal">启用</span>' : '<span class="badge off">停用</span>'}</td>
+    <td style="white-space:nowrap">
+      <button class="act" onclick="moveProvider('${p.id}','up')">↑</button>
+      <button class="act" onclick="moveProvider('${p.id}','down')">↓</button>
+      <button class="act" onclick="toggleProvider('${p.id}',${!p.enabled})">${p.enabled ? "停用" : "启用"}</button>
+      <button class="act" onclick="testProvider('${p.id}', this)">测试</button>
+      <button class="act" onclick="editProvider('${p.id}')">编辑</button>
+      <button class="act danger" onclick="deleteProvider('${p.id}')">删除</button>
+    </td>
+  </tr>`).join("");
+  document.getElementById("pv-table").innerHTML =
+    `<table><thead><tr><th>渠道</th><th>优先级</th><th>探测</th><th>baseURL</th><th>apiKey</th><th>模型</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>`
+    || "";
+}
+
+let _editing = null; // null=新建
+async function editProvider(id) {
+  _editing = id;
+  let p = { id: "", name: "", priority: 10, probe: "none", baseURL: "", apiKey: "", models: [], enabled: true };
+  if (id) {
+    const data = await api("/api/providers");
+    p = (data.providers || []).find(x => x.id === id) || p;
+  }
+  document.getElementById("pv-title").textContent = id ? "编辑渠道：" + id : "新建渠道";
+  document.getElementById("pv-id").value = p.id;
+  document.getElementById("pv-id").disabled = !!id;
+  document.getElementById("pv-name").value = p.name || "";
+  document.getElementById("pv-priority").value = p.priority;
+  document.getElementById("pv-probe").value = p.probe || "none";
+  document.getElementById("pv-base").value = p.baseURL || "";
+  document.getElementById("pv-key").value = "";
+  document.getElementById("pv-key-hint").textContent = id ? (p.apiKey ? "当前：" + p.apiKey + "（留空保持不变）" : "当前：空（复用全局）") : "留空 = 复用全局读取链";
+  document.getElementById("pv-models").value = (p.models || []).join(", ");
+  document.getElementById("pv-enabled").checked = !!p.enabled;
+  document.getElementById("pv-modal").classList.remove("hidden");
+}
+
+async function saveProvider() {
+  const body = {
+    name: document.getElementById("pv-name").value,
+    priority: parseInt(document.getElementById("pv-priority").value || "10", 10),
+    probe: document.getElementById("pv-probe").value,
+    baseURL: document.getElementById("pv-base").value.trim(),
+    models: document.getElementById("pv-models").value.split(/[,，]/).map(s => s.trim()).filter(Boolean),
+    enabled: document.getElementById("pv-enabled").checked,
+  };
+  const key = document.getElementById("pv-key").value.trim();
+  if (!_editing) body.id = document.getElementById("pv-id").value.trim();
+  if (key || !_editing) body.apiKey = key;
+  try {
+    const r = await api("/api/providers/" + encodeURIComponent(_editing || body.id), {
+      method: "PUT", headers: Object.assign({ "Content-Type": "application/json" }, hdrs()), body: JSON.stringify(body),
+    });
+    showMsg("pv-msg", r.message || "已保存", true);
+    closeModal();
+    await loadProviders();
+  } catch (e) { showMsg("pv-msg", e.message, false); }
+}
+
+async function moveProvider(id, dir) {
+  try {
+    await api(`/api/providers/${encodeURIComponent(id)}/move`, {
+      method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, hdrs()),
+      body: JSON.stringify({ dir }),
+    });
+    await loadProviders();
+  } catch (e) { showMsg("pv-msg", e.message, false); }
+}
+
+async function toggleProvider(id, enabled) {
+  try {
+    await api("/api/providers/" + encodeURIComponent(id), {
+      method: "PUT", headers: Object.assign({ "Content-Type": "application/json" }, hdrs()),
+      body: JSON.stringify({ enabled }),
+    });
+    await loadProviders();
+  } catch (e) { showMsg("pv-msg", e.message, false); }
+}
+
+async function deleteProvider(id) {
+  if (!confirm(`确认删除渠道 ${id}？（写回配置文件）`)) return;
+  try {
+    const r = await api("/api/providers/" + encodeURIComponent(id), { method: "DELETE" });
+    showMsg("pv-msg", r.message || "已删除", true);
+    await loadProviders();
+  } catch (e) { showMsg("pv-msg", e.message, false); }
+}
+
+async function testProvider(id, btn) {
+  btn.textContent = "…";
+  try {
+    const r = await api(`/api/providers/${encodeURIComponent(id)}/test`, { method: "POST" });
+    btn.textContent = r.ok ? "✓" : "✗";
+    showMsg("pv-msg", `${id}: ${r.message}`, r.ok);
+  } catch (e) { btn.textContent = "✗"; showMsg("pv-msg", e.message, false); }
+  setTimeout(() => { btn.textContent = "测试"; }, 3000);
+}
+
+async function loadImport() {
+  try {
+    const data = await api("/api/agents");
+    const agents = data.agents || [];
+    if (!agents.length) { showMsg("pv-msg", "未发现任何智能体 provider 条目", false); return; }
+    let html = "";
+    for (const a of agents) {
+      html += `<div class="card"><b>${a.agent}</b><table><thead><tr><th>导入</th><th>ID</th><th>baseURL</th><th>apiKey</th><th>模型</th><th>建议探测</th><th>来源</th></tr></thead><tbody>` +
+        a.providers.map(p => `<tr>
+          <td><input type="checkbox" class="imp" value="${a.agent}:${p.id}" ${p.inPool ? "disabled" : "checked"}></td>
+          <td>${p.id}${p.inPool ? ' <span class="badge off">已在池</span>' : ""}</td>
+          <td class="muted" style="max-width:220px;word-break:break-all">${escapeHtml(p.baseUrl || "–")}</td>
+          <td class="muted">${p.apiKey ? escapeHtml(p.apiKey) : "–"}</td>
+          <td class="muted">${(p.models || []).join(", ") || "–"}</td>
+          <td class="muted">${p.suggestedProbeType}</td>
+          <td class="muted">${p.source}</td>
+        </tr>`).join("") + "</tbody></table></div>";
+    }
+    html += `<button class="act primary" onclick="doImport()">导入勾选项入池</button>`;
+    showMsg("pv-msg", html, true, true);
+  } catch (e) { showMsg("pv-msg", e.message, false); }
+}
+
+async function doImport() {
+  const ids = Array.from(document.querySelectorAll("input.imp:checked")).map(x => x.value);
+  if (!ids.length) { showMsg("pv-msg", "未勾选任何条目", false); return; }
+  try {
+    const r = await api("/api/providers/import", {
+      method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, hdrs()),
+      body: JSON.stringify({ ids }),
+    });
+    showMsg("pv-msg", `已导入：${(r.added || []).join(", ") || "（无）"}；跳过：${(r.skipped || []).join(", ") || "（无）"}`, true);
+    await loadProviders();
+  } catch (e) { showMsg("pv-msg", e.message, false); }
+}
+
+// ────────── 日志 ──────────
+let _logTimer = null;
+function toggleLogPoll() {
+  if (_logTimer) { clearInterval(_logTimer); _logTimer = null; }
+  else _logTimer = setInterval(pollLogs, 2000);
+}
+async function pollLogs() {
+  if (activeTab() !== "logs") return;
+  try {
+    const data = await api("/api/logs?tail=200");
+    const lines = (data.entries || []).map(e =>
+      `${new Date(e.time).toLocaleTimeString("zh-CN", { hour12: false })}  ${e.model}  →  ${e.providerId}` +
+      `  [${(e.chain || []).join(" → ")}]  ${e.statusCode ?? "-"}  ${e.durationMs}ms` +
+      (e.error ? `  ${e.error}` : ""));
+    document.getElementById("log-body").textContent = lines.join("\n") || "（暂无请求）";
+  } catch (e) {
+    document.getElementById("log-body").textContent = "加载失败：" + e.message;
+  }
+}
+
+// ────────── 部署 ──────────
+async function loadDeploy() {
+  const data = await api("/api/agents");
+  const agents = data.agents || [];
+  document.getElementById("dp-list").innerHTML = agents.map(a => {
+    const oc = a.agent === "opencode";
+    return `<div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div class="row"><b>${a.agent}</b>${oc ? "" : '<span class="badge off">占位（未实现）</span>'}</div>
+        ${oc ? `<div class="row">
+          <label class="muted"><input type="checkbox" id="dp-default"> 设为全局默认（localrelay/glm-5.3-flash）</label>
+          <button class="act" onclick="deployPreview()">生成预览</button>
+          <button class="act primary" onclick="deployConfirm()">写入配置</button>
+        </div>` : ""}
+      </div>
+      <div class="muted" style="margin-top:6px">已发现 ${a.providers.length} 个 provider：${a.providers.map(p => p.id).join(", ")}</div>
+    </div>`;
+  }).join("") || '<div class="card muted">未发现任何智能体配置</div>';
+}
+
+async function deployPreview() {
+  const setDefault = document.getElementById("dp-default").checked;
+  try {
+    const r = await api(`/api/agents/opencode/deploy?dryRun=true&setDefault=${setDefault}`);
+    showMsg("dp-msg", r.preview || r.message || "(空)", r.ok, true);
+  } catch (e) { showMsg("dp-msg", e.message, false); }
+}
+
+async function deployConfirm() {
+  const setDefault = document.getElementById("dp-default").checked;
+  if (!confirm("确认写入 opencode.json？写入前自动备份；既有 provider 条目不会被改动。")) return;
+  try {
+    const r = await api(`/api/agents/opencode/deploy?confirm=true&setDefault=${setDefault}`, { method: "POST" });
+    showMsg("dp-msg", r.message || (r.ok ? "已写入" : "失败"), r.ok, true);
+  } catch (e) { showMsg("dp-msg", e.message, false); }
+}
+
+// ────────── 设置 ──────────
+async function loadSettings() {
+  const s = await api("/api/settings");
+  document.getElementById("st-port").value = s.port;
+  document.getElementById("st-probe").value = s.probeIntervalSeconds;
+  document.getElementById("st-degrade").value = s.degradeBelowPct;
+  document.getElementById("st-restore").value = s.restoreAbovePct;
+  document.getElementById("st-quota").value = s.cooldown.quotaSeconds;
+  document.getElementById("st-eth").value = s.cooldown.errorThreshold;
+  document.getElementById("st-ets").value = s.cooldown.errorSeconds;
+}
+
+async function saveSettings() {
+  const body = {
+    port: parseInt(document.getElementById("st-port").value || "8787", 10),
+    probeIntervalSeconds: parseInt(document.getElementById("st-probe").value || "60", 10),
+    degradeBelowPct: parseInt(document.getElementById("st-degrade").value || "5", 10),
+    restoreAbovePct: parseInt(document.getElementById("st-restore").value || "10", 10),
+    cooldown: {
+      quotaSeconds: parseInt(document.getElementById("st-quota").value || "300", 10),
+      errorThreshold: parseInt(document.getElementById("st-eth").value || "3", 10),
+      errorSeconds: parseInt(document.getElementById("st-ets").value || "60", 10),
+    },
+  };
+  try {
+    const r = await api("/api/settings", {
+      method: "PUT", headers: Object.assign({ "Content-Type": "application/json" }, hdrs()),
+      body: JSON.stringify(body),
+    });
+    showMsg("st-msg", r.message || "已保存", true);
+    (r.warnings || []).forEach(w => showMsg("st-msg", "⚠ " + w, true));
+  } catch (e) { showMsg("st-msg", e.message, false); }
+}
+
+async function resetToken() {
+  if (!confirm("确认重置 localToken？\n新 token 将写回配置文件；opencode 端 localrelay provider 必须同步重新部署，否则请求将 401。")) return;
+  try {
+    const r = await api("/api/settings", {
+      method: "PUT", headers: Object.assign({ "Content-Type": "application/json" }, hdrs()),
+      body: JSON.stringify({ resetToken: true }),
+    });
+    showMsg("st-msg", "新 token（仅本次显示，请立即复制并重新部署 opencode）：\n" + r.newToken, true, true);
+    (r.warnings || []).forEach(w => showMsg("st-msg", "⚠ " + w, true));
+  } catch (e) { showMsg("st-msg", e.message, false); }
+}
+
+// ────────── 通用 ──────────
+function showMsg(id, text, ok, html) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.className = ok ? "ok-msg" : "err";
+  if (html) el.innerHTML = text; else el.textContent = text;
+}
+
+async function refreshAll() {
+  if (!TOKEN) { askToken(true); return; }
+  try {
+    const tab = activeTab();
+    if (tab === "overview") await loadOverview();
+    else if (tab === "providers") await loadProviders();
+    else if (tab === "logs") await pollLogs();
+    else if (tab === "deploy") await loadDeploy();
+    else if (tab === "settings") await loadSettings();
+  } catch { /* 401 已弹窗 */ }
+}
+
+setInterval(() => { if (activeTab() === "overview" && TOKEN) loadOverview().catch(() => {}); }, 5000);
+
+refreshAll();
+</script>
+</body>
+</html>

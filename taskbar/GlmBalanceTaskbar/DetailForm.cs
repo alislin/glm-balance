@@ -50,6 +50,11 @@ sealed class DetailForm : Form
     readonly Label _lblUpdated;
     readonly Button _btnRefresh;
     readonly Button _btnExit;
+    readonly Button _btnPanel;
+
+    readonly Label _lblRelayHeader;
+    readonly Label[] _lblRelayRows;
+    const int MaxRelayRows = 6;
 
     readonly List<Section> _sections;
     bool _reallyExit;
@@ -57,6 +62,9 @@ sealed class DetailForm : Form
 
     /// <summary>用户点击"立即刷新"。</summary>
     public event EventHandler? RefreshRequested;
+
+    /// <summary>用户点击"管理面板"。</summary>
+    public event EventHandler? PanelRequested;
 
     public DetailForm()
     {
@@ -93,8 +101,21 @@ sealed class DetailForm : Form
         _sparkChart = new SparkChartControl { Location = new Point(88, 0), Size = new Size(W - 104, 44), TabStop = false };
         Controls.Add(_sparkChart);
 
+        // 模型中转分组（每渠道一行；无 relay 配置时整体隐藏，不占位）
+        _lblRelayHeader = AddLabel("模型中转", PageMargin, 0, 200, 20, muted: true, bold: true);
+        _lblRelayRows = new Label[MaxRelayRows];
+        for (var i = 0; i < MaxRelayRows; i++)
+        {
+            _lblRelayRows[i] = AddLabel("", 34, 0, W - PageMargin - 34, 20, muted: false, fontSize: 8.5F);
+            _lblRelayRows[i].Visible = false;
+        }
+
         _lblModels = AddLabel("", PageMargin, 0, W - PageMargin * 2, 72);
-        _lblUpdated = AddLabel("", PageMargin, 0, 210, 18, muted: true);
+        _lblUpdated = AddLabel("", 116, 0, 126, 18, muted: true);
+
+        _btnPanel = new Button { Text = "管理面板", Location = new Point(PageMargin, 0), Size = new Size(92, 28) };
+        _btnPanel.Click += (_, _) => PanelRequested?.Invoke(this, EventArgs.Empty);
+        Controls.Add(_btnPanel);
 
         _btnRefresh = new Button { Text = "立即刷新", Location = new Point(W - 196, 0), Size = new Size(92, 28) };
         _btnRefresh.Click += (_, _) => RefreshRequested?.Invoke(this, EventArgs.Empty);
@@ -116,6 +137,7 @@ sealed class DetailForm : Form
         SetRow(_lblActStreakKey, _lblActStreakVal, false, null);
         _lblActSparkKey.Visible = _sparkChart.Visible = false;
         _lblModels.Visible = false;
+        _lblRelayHeader.Visible = false;
 
         // 区块注册（顺序即布局顺序）
         _sections = new List<Section>
@@ -138,6 +160,7 @@ sealed class DetailForm : Form
                     Rw(44, _sparkChart),
                 },
             },
+            RelaySection(),
             new() { Rows = { new Row { Controls = new Control[] { _lblModels }, Height = () => _lblModels.Height } } },
         };
 
@@ -152,6 +175,82 @@ sealed class DetailForm : Form
         bar = new BarControl { Location = new Point(PageMargin, 0), Size = new Size(W - PageMargin * 2, 12), TabStop = false };
         Controls.Add(bar);
         detail = AddLabel("", PageMargin, 0, W - PageMargin * 2, 20, muted: true);
+    }
+
+    /// <summary>「模型中转」区块：标题行 + 每渠道一行（随 UpdateRelay 显隐；无 relay 时整块隐藏不占位）。</summary>
+    Section RelaySection()
+    {
+        var s = new Section();
+        s.Rows.Add(Rw(20, _lblRelayHeader));
+        foreach (var lbl in _lblRelayRows)
+        {
+            s.Rows.Add(new Row { Controls = new Control[] { lbl }, Height = () => lbl.Visible ? 20 : 0 });
+        }
+        return s;
+    }
+
+    /// <summary>渠道行状态文本；返回 (文本, 颜色, 是否当前通道高亮)。</summary>
+    static (string Text, Color Color, bool Current) RelayRowText(ProviderStatus p, string? currentId)
+    {
+        var current = p.Id == currentId;
+        var mark = current ? "▶ " : "  ";
+        var state = p.State switch
+        {
+            "normal" => "正常",
+            "cooldown" => $"冷却 {p.CooldownRemainingSec ?? 0}s",
+            "degraded" => "降级",
+            "no-key" => "无 key",
+            _ => p.State,
+        };
+        if (!p.Enabled) state = "已停用";
+        var color = p.State switch
+        {
+            "normal" => current ? Colors.SuccessDark : Colors.Success,
+            "degraded" => Colors.Warning,
+            "cooldown" => Colors.Error,
+            _ => Colors.Muted,
+        };
+        var text = $"{mark}{p.Id}  {state}";
+        if (p.RemainingPct is { } pct) text += $" · {p.SourceLabel ?? "剩余"} {pct}%";
+        if (p.LastUsedAt is { } used) text += $" · {used.LocalDateTime:HH:mm:ss}";
+        if (p.LastError is { } err && err.Length > 0) text += $" · {Truncate(err, 48)}";
+        return (text, color, current);
+    }
+
+    static string Truncate(string s, int max) => s.Length <= max ? s : s[..max] + "…";
+
+    /// <summary>更新「模型中转」分组（随刷新节流调用）；null = relay 未运行，整块隐藏。</summary>
+    public void UpdateRelay(RelayStatus? st)
+    {
+        var visible = st is { Providers.Count: > 0 };
+        _lblRelayHeader.Visible = visible;
+        if (!visible)
+        {
+            foreach (var lbl in _lblRelayRows) lbl.Visible = false;
+            return;
+        }
+        var i = 0;
+        for (; i < Math.Min(st!.Providers.Count, MaxRelayRows); i++)
+        {
+            var (text, color, isCurrent) = RelayRowText(st.Providers[i], st.CurrentId);
+            var lbl = _lblRelayRows[i];
+            lbl.Visible = true;
+            lbl.Text = text;
+            lbl.ForeColor = color;
+            lbl.Font = new Font("Segoe UI", isCurrent ? 9F : 8.5F, isCurrent ? FontStyle.Bold : FontStyle.Regular);
+        }
+        for (; i < MaxRelayRows; i++)
+        {
+            _lblRelayRows[i].Visible = false;
+        }
+        if (st.Providers.Count > MaxRelayRows)
+        {
+            _lblRelayRows[^1].Visible = true;
+            _lblRelayRows[^1].Text = $"  …共 {st.Providers.Count} 个渠道";
+            _lblRelayRows[^1].ForeColor = Colors.Muted;
+            _lblRelayRows[^1].Font = new Font("Segoe UI", 8.5F);
+        }
+        Relayout();
     }
 
     Label AddLabel(string text, int x, int y, int w, int h, bool muted = false, bool bold = false, float fontSize = 9F, Color? color = null, bool right = false, AnchorStyles anchor = AnchorStyles.Top | AnchorStyles.Left)
@@ -238,6 +337,7 @@ sealed class DetailForm : Form
         }
         if (needGap) y += SectionGap - RowGap;
 
+        _btnPanel.Top = y;
         _btnRefresh.Top = y;
         _btnExit.Top = y;
         _lblUpdated.Top = y + 7;

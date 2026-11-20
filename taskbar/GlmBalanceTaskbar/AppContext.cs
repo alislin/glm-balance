@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.Windows.Forms;
@@ -17,6 +18,7 @@ sealed class AppContext : ApplicationContext
     readonly DetailForm _form;
     readonly NotifyIcon _tray;
     readonly System.Windows.Forms.Timer _timer;
+    readonly RelayManager? _relay;
     TrayPreviewForm? _trayPreview;
     UsageSnapshot? _lastSnap;
     Icon? _icon;
@@ -31,6 +33,15 @@ sealed class AppContext : ApplicationContext
         _form = new DetailForm();
         MainForm = _form;
         _form.RefreshRequested += (_, _) => _ = RefreshAsync(force: true);
+        _form.PanelRequested += (_, _) => OpenAdminPanel();
+
+        // 中转（relay 段缺省 = 关闭，原功能零影响）；启动失败只记 warnings，配额显示不受影响
+        if (cfg.Relay is { Enabled: true } opts)
+        {
+            var relay = new RelayManager(cfg, opts);
+            relay.Start(cfg.Warnings); // 失败原因写入 cfg.Warnings（详情窗可见）；实例保留供状态展示与 Dispose
+            _relay = relay;
+        }
 
         // 系统托盘：动态数字图标（不设置 Text，避免与自绘多行摘要浮窗重叠出现两个 tooltip）
         _tray = new NotifyIcon
@@ -40,6 +51,10 @@ sealed class AppContext : ApplicationContext
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开详情", null, (_, _) => ShowMainWindow());
         menu.Items.Add("立即刷新", null, (_, _) => _ = RefreshAsync(force: true));
+        if (_relay is { Running: true } r)
+        {
+            menu.Items.Add("管理面板", null, (_, _) => OpenAdminPanel(r.AdminUrl));
+        }
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出", null, (_, _) => _form.RequestExit());
         _tray.ContextMenuStrip = menu;
@@ -115,6 +130,9 @@ sealed class AppContext : ApplicationContext
         _lastSnap = s;
         try
         {
+            // 最新快照喂给中转探测缓存（ZhipuMonitorProbe 优先复用）
+            _relay?.FeedSnapshot(s);
+
             if (s.Error != null)
             {
                 _form.Text = $"GLM: {s.Error}";
@@ -139,6 +157,7 @@ sealed class AppContext : ApplicationContext
                 TaskbarProgress.Clear(_form.Handle);
             }
             _form.UpdateData(s);
+            _form.UpdateRelay(_relay is { Running: true } running ? running.Snapshot() : null);
         }
         catch (Exception ex)
         {
@@ -146,7 +165,7 @@ sealed class AppContext : ApplicationContext
         }
     }
 
-    /// <summary>悬停托盘图标：显示多行摘要浮窗（周/5h/活跃度），内容取最近一次刷新快照。</summary>
+    /// <summary>悬停托盘图标：显示多行摘要浮窗（周/5h/活跃度/中转），内容取最近一次刷新快照。</summary>
     void ShowTrayPreview()
     {
         var s = _lastSnap;
@@ -154,7 +173,29 @@ sealed class AppContext : ApplicationContext
         try
         {
             _trayPreview ??= new TrayPreviewForm();
-            _trayPreview.ShowPreview(PreviewTitle(s), PreviewBody(s), Cursor.Position);
+            _trayPreview.ShowPreview(PreviewTitle(s), PreviewBody(s, RelayLine()), Cursor.Position);
+        }
+        catch
+        {
+            /* ignore */
+        }
+    }
+
+    /// <summary>托盘悬停的"中转"行；relay 未配置（无 relay 段）时不显示，保持原摘要形态。</summary>
+    string? RelayLine()
+    {
+        if (_relay == null) return null; // 原功能零影响：配置无 relay 段 → 悬停摘要与旧版一致
+        return _relay.PreviewLine();
+    }
+
+    /// <summary>用系统默认浏览器打开中转管理面板。</summary>
+    void OpenAdminPanel(string? url = null)
+    {
+        var target = url ?? _relay?.AdminUrl;
+        if (target == null) return;
+        try
+        {
+            Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
         }
         catch
         {
@@ -165,7 +206,7 @@ sealed class AppContext : ApplicationContext
     static string PreviewTitle(UsageSnapshot s) =>
         $"GLM 用量{(s.Level != null ? $"  [{s.Level}]" : "")}";
 
-    static string PreviewBody(UsageSnapshot s)
+    static string PreviewBody(UsageSnapshot s, string? relayLine)
     {
         if (s.Error != null) return s.Error;
         var lines = new List<string>();
@@ -178,6 +219,7 @@ sealed class AppContext : ApplicationContext
                 .Where(x => x != null));
             if (act.Length > 0) lines.Add($"活跃度  {act}");
         }
+        if (relayLine != null) lines.Add(relayLine);
         lines.Add($"更新于 {s.FetchedAt.LocalDateTime:HH:mm}");
         return string.Join("\n", lines);
     }
@@ -195,6 +237,7 @@ sealed class AppContext : ApplicationContext
     {
         if (disposing)
         {
+            _relay?.Dispose(); // 先停中转监听，再释放 UI 资源
             _timer.Dispose();
             _client.Dispose();
             // 托盘图标必须先隐藏再释放，避免残留幽灵图标

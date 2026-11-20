@@ -98,6 +98,24 @@ static class Program
         Console.WriteLine($"config: base={cfg.MonitorBase} org={Mask(cfg.Organization)} project={Mask(cfg.Project)} type={CfgStr(cfg.UsageType?.ToString())} interval={cfg.IntervalSeconds}s activity={cfg.Activity}");
         foreach (var w in cfg.Warnings) Console.WriteLine($"warn: {w}");
 
+        if (cfg.Relay is { } relay)
+        {
+            Console.WriteLine(
+                $"relay: enabled={relay.Enabled} port={relay.Port} probe={relay.ProbeIntervalSeconds}s " +
+                $"degrade<{relay.DegradeBelowPct}% restore>={relay.RestoreAbovePct}% " +
+                $"cooldown(quota={relay.Cooldown.QuotaSeconds}s err={relay.Cooldown.ErrorThreshold}次/{relay.Cooldown.ErrorSeconds}s) " +
+                $"token={FmtTokenState(relay.LocalToken)}");
+            foreach (var p in relay.Providers)
+            {
+                var keyState = p.ApiKey.Length > 0 ? "独立 key" : "复用全局";
+                Console.WriteLine($"  - {p.Id} ({p.Name}) priority={p.Priority} probe={p.Probe} key={keyState} models=[{string.Join(", ", p.Models)}] enabled={p.Enabled}");
+            }
+        }
+        else
+        {
+            Console.WriteLine("relay: 未配置（中转关闭，原功能不受影响）");
+        }
+
         using var client = new GlmApiClient(cfg);
         var snap = client.FetchUsageAsync().GetAwaiter().GetResult();
         if (snap.Error != null)
@@ -116,6 +134,16 @@ static class Program
         if (snap.Models.Count > 0)
         {
             Console.WriteLine("models: " + string.Join(", ", snap.Models.Select(m => $"{m.Name} {ActivityParser.FmtTokens(m.Tokens)}")));
+        }
+
+        if (cfg.Relay is { Enabled: true } relayOn && snap.Error == null)
+        {
+            // 渠道状态评估（复用刚抓的快照做探测缓存；不监听端口、不写文件）
+            Console.WriteLine("relay channels:");
+            foreach (var line in RelayManager.EvaluateOnce(cfg, relayOn, snap))
+            {
+                Console.WriteLine(line);
+            }
         }
 
         if (cfg.Activity)
@@ -161,6 +189,9 @@ static class Program
     }
 
     static string Mask(string? s) => s == null ? "-" : s.Length <= 12 ? s : s[..12] + "…";
+
+    static string FmtTokenState(string token) =>
+        string.IsNullOrWhiteSpace(token) ? "自动生成（首启写回）" : "已配置（…" + token[^6..] + ")";
 
     static string CfgStr(string? s) => s ?? "-";
 
