@@ -111,7 +111,8 @@ public sealed class OpenCodeDeployer : IAgentDeployer
                 ["baseURL"] = req.BaseUrl,
                 ["apiKey"] = RelayJson.MaskKey(req.Token) + "（完整值写回）",
             },
-            ["models"] = new JsonArray(req.Models.Select(m => JsonValue.Create(m)).ToArray()),
+            ["models"] = new JsonObject(req.Models.Select(m =>
+                new KeyValuePair<string, JsonNode?>(m, BuildModelNode(m)))),
         };
         return (existing ? "将替换现有 localrelay 条目：\n" : "将新增 provider 条目：\n")
             + relay.ToJsonString(RelayJson.Indented)
@@ -140,6 +141,14 @@ public sealed class OpenCodeDeployer : IAgentDeployer
             ["apiKey"] = req.Token,
         },
         ["models"] = new JsonObject(req.Models.Select(m =>
-            new KeyValuePair<string, JsonNode?>(m, new JsonObject { ["name"] = m }))),
+            new KeyValuePair<string, JsonNode?>(m, BuildModelNode(m)))),
+    };
+
+    /// <summary>模型节点：name + limit.context（token）。缺省时 opencode 端上下文用量显示失真；
+    /// 部署为 localrelay 条目整体覆盖写，每次部署随节点重新生成。</summary>
+    static JsonObject BuildModelNode(string m) => new()
+    {
+        ["name"] = m,
+        ["limit"] = new JsonObject { ["context"] = 1_000_000 },
     };
 }
