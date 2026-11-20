@@ -4,10 +4,45 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GlmBalance 中转管理面板</title>
+<script>
+  // 首帧前解析主题，避免浅色系统下闪烁：localStorage 手动值优先，否则交给 CSS 的 prefers-color-scheme
+  (function () {
+    try {
+      var t = localStorage.getItem("relay_theme");
+      if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+    } catch (e) { /* 隐私模式等场景忽略，回退跟随系统 */ }
+  })();
+</script>
 <style>
+  /* ── 主题变量：默认深色；浅色值在手动 [data-theme="light"] 与系统浅色兜底两处保持一致 ── */
   :root {
+    color-scheme: dark;
     --bg: #14161a; --panel: #1d2026; --line: #2e323b; --text: #e6e8ec; --muted: #8b909c;
-    --accent: #4f8cff; --ok: #3fb96b; --warn: #d9a441; --bad: #e05d5d;
+    --accent: #4f8cff; --on-accent: #fff;
+    --ok: #3fb96b; --warn: #d9a441; --bad: #e05d5d;
+    --ok-bg: rgba(63,185,107,.15); --warn-bg: rgba(217,164,65,.15); --bad-bg: rgba(224,93,93,.15);
+    --muted-bg: rgba(139,144,156,.15); --chip-bg: #262a32;
+    --input-bg: #171a20; --overlay: rgba(0,0,0,.6);
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f5f6f8; --panel: #ffffff; --line: #d9dde3; --text: #1e232b; --muted: #5f6672;
+    --accent: #2b6be3; --on-accent: #fff;
+    --ok: #1e7f46; --warn: #9a6b12; --bad: #c03d3d;
+    --ok-bg: rgba(30,127,70,.12); --warn-bg: rgba(217,164,65,.18); --bad-bg: rgba(224,93,93,.14);
+    --muted-bg: rgba(95,102,114,.12); --chip-bg: #eef1f5;
+    --input-bg: #f2f4f8; --overlay: rgba(15,20,30,.45);
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      color-scheme: light;
+      --bg: #f5f6f8; --panel: #ffffff; --line: #d9dde3; --text: #1e232b; --muted: #5f6672;
+      --accent: #2b6be3; --on-accent: #fff;
+      --ok: #1e7f46; --warn: #9a6b12; --bad: #c03d3d;
+      --ok-bg: rgba(30,127,70,.12); --warn-bg: rgba(217,164,65,.18); --bad-bg: rgba(224,93,93,.14);
+      --muted-bg: rgba(95,102,114,.12); --chip-bg: #eef1f5;
+      --input-bg: #f2f4f8; --overlay: rgba(15,20,30,.45);
+    }
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; }
@@ -27,22 +62,23 @@
   th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { color: var(--muted); font-weight: 500; font-size: 12px; white-space: nowrap; }
   .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
-  .badge.normal { background: rgba(63,185,107,.15); color: var(--ok); }
-  .badge.cooldown { background: rgba(224,93,93,.15); color: var(--bad); }
-  .badge.degraded { background: rgba(217,164,65,.15); color: var(--warn); }
-  .badge.no-key { background: rgba(139,144,156,.15); color: var(--muted); }
-  .badge.off { background: rgba(139,144,156,.15); color: var(--muted); }
+  .badge.normal { background: var(--ok-bg); color: var(--ok); }
+  .badge.cooldown { background: var(--bad-bg); color: var(--bad); }
+  .badge.degraded { background: var(--warn-bg); color: var(--warn); }
+  .badge.no-key { background: var(--muted-bg); color: var(--muted); }
+  .badge.off { background: var(--muted-bg); color: var(--muted); }
+  .badge.prio { background: var(--muted-bg); color: var(--muted); }
   button.act { background: var(--panel); border: 1px solid var(--line); color: var(--text); border-radius: 6px; padding: 4px 12px; cursor: pointer; font-size: 12px; }
   button.act:hover { border-color: var(--accent); }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
   button.danger { border-color: var(--bad); color: var(--bad); }
-  input, select, textarea { background: #171a20; border: 1px solid var(--line); color: var(--text); border-radius: 6px; padding: 6px 10px; font: inherit; }
+  input, select, textarea { background: var(--input-bg); border: 1px solid var(--line); color: var(--text); border-radius: 6px; padding: 6px 10px; font: inherit; }
   input[type=text], input[type=number] { width: 220px; }
   textarea { width: 100%; min-height: 130px; font-family: Consolas, monospace; font-size: 12px; white-space: pre; }
   .muted { color: var(--muted); font-size: 12px; }
   .err { color: var(--bad); font-size: 12px; white-space: pre-wrap; }
   .ok-msg { color: var(--ok); font-size: 12px; white-space: pre-wrap; }
-  .modal { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; z-index: 10; }
+  .modal { position: fixed; inset: 0; background: var(--overlay); display: flex; align-items: center; justify-content: center; z-index: 10; }
   .modal .box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 22px; width: 420px; }
   .modal h3 { margin: 0 0 10px; font-size: 15px; }
   .grid2 { display: grid; grid-template-columns: 130px 1fr; gap: 8px 12px; align-items: center; margin: 10px 0; }
@@ -50,6 +86,14 @@
   .hidden { display: none !important; }
   .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; width: 110px; display: inline-block; vertical-align: middle; }
   .bar i { display: block; height: 100%; background: var(--ok); }
+  /* ── Provider 池卡片 ── */
+  .pv-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+  .pv-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .pv-id { font-weight: 600; font-size: 14px; }
+  .pv-name { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .pv-meta { color: var(--muted); font-size: 12px; word-break: break-all; }
+  .chip { display: inline-block; background: var(--chip-bg); border: 1px solid var(--line); border-radius: 10px; padding: 0 10px; font-size: 12px; color: var(--text); }
+  .pv-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); }
 </style>
 </head>
 <body>
@@ -58,6 +102,7 @@
   <span class="sub" id="hd-info">…</span>
   <span style="flex:1"></span>
   <span class="sub" id="hd-token-state"></span>
+  <button class="act" id="theme-btn" onclick="cycleTheme()">主题：跟随系统</button>
   <button class="act" onclick="askToken(true)">更换 Token</button>
 </header>
 <nav id="tabs">
@@ -208,6 +253,30 @@ function saveToken() {
 }
 document.getElementById("token-input").addEventListener("keydown", e => { if (e.key === "Enter") saveToken(); });
 
+// ────────── 主题切换（三态：浅 → 深 → 跟随系统） ──────────
+const THEME_KEY = "relay_theme";
+function themeMode() { return localStorage.getItem(THEME_KEY) || "auto"; }
+function effectiveTheme() {
+  if (themeMode() !== "auto") return themeMode();
+  return window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+}
+function updateThemeBtn() {
+  const m = themeMode(), eff = effectiveTheme();
+  const label = m === "light" ? "主题：浅色"
+    : m === "dark" ? "主题：深色"
+    : `主题：跟随系统（当前${eff === "light" ? "浅" : "深"}色）`;
+  document.getElementById("theme-btn").textContent = label;
+}
+function cycleTheme() {
+  const next = themeMode() === "light" ? "dark" : themeMode() === "dark" ? "auto" : "light";
+  try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* ignore */ }
+  if (next === "auto") delete document.documentElement.dataset.theme; // 回归 CSS prefers-color-scheme
+  else document.documentElement.dataset.theme = next;
+  updateThemeBtn();
+}
+try { matchMedia("(prefers-color-scheme: light)").addEventListener("change", updateThemeBtn); } catch (e) { /* ignore */ }
+updateThemeBtn();
+
 // ────────── fetch 封装 ──────────
 async function api(path, opts) {
   const res = await fetch(path, Object.assign({ headers: hdrs() }, opts));
@@ -304,26 +373,28 @@ function escapeHtml(s) { const d = document.createElement("div"); d.textContent 
 async function loadProviders() {
   const data = await api("/api/providers");
   const list = data.providers || [];
-  const rows = list.map(p => `<tr>
-    <td>${p.id}<div class="muted">${escapeHtml(p.name || "")}</div></td>
-    <td>${p.priority}</td>
-    <td>${p.probe}</td>
-    <td class="muted" style="max-width:220px;word-break:break-all">${escapeHtml(p.baseURL)}</td>
-    <td class="muted">${p.apiKey ? escapeHtml(p.apiKey) : "（复用全局）"}</td>
-    <td class="muted">${(p.models || []).join(", ")}</td>
-    <td>${p.enabled ? '<span class="badge normal">启用</span>' : '<span class="badge off">停用</span>'}</td>
-    <td style="white-space:nowrap">
+  const cards = list.map(p => `<div class="pv-card">
+    <div class="pv-head">
+      <span class="pv-id">${p.id}</span>
+      <span class="badge prio">优先级 ${p.priority}</span>
+      <span class="badge ${p.enabled ? "normal" : "off"}">${p.enabled ? "启用" : "停用"}</span>
+      <span class="muted">探测 ${p.probe}</span>
+    </div>
+    ${p.name ? `<div class="pv-name">${escapeHtml(p.name)}</div>` : ""}
+    <div class="pv-meta" style="margin-top:8px">baseURL：<b>${escapeHtml(p.baseURL)}</b></div>
+    <div class="pv-meta">apiKey：${p.apiKey ? escapeHtml(p.apiKey) : "（复用全局）"}</div>
+    <div class="row" style="gap:6px;margin-top:6px">${(p.models || []).map(m => `<span class="chip">${escapeHtml(m)}</span>`).join("") || '<span class="muted">未配置模型</span>'}</div>
+    <div class="pv-actions">
       <button class="act" onclick="moveProvider('${p.id}','up')">↑</button>
       <button class="act" onclick="moveProvider('${p.id}','down')">↓</button>
       <button class="act" onclick="toggleProvider('${p.id}',${!p.enabled})">${p.enabled ? "停用" : "启用"}</button>
       <button class="act" onclick="testProvider('${p.id}', this)">测试</button>
       <button class="act" onclick="editProvider('${p.id}')">编辑</button>
       <button class="act danger" onclick="deleteProvider('${p.id}')">删除</button>
-    </td>
-  </tr>`).join("");
+    </div>
+  </div>`).join("");
   document.getElementById("pv-table").innerHTML =
-    `<table><thead><tr><th>渠道</th><th>优先级</th><th>探测</th><th>baseURL</th><th>apiKey</th><th>模型</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>`
-    || "";
+    cards || '<div class="muted">渠道池为空</div>';
 }
 
 let _editing = null; // null=新建
