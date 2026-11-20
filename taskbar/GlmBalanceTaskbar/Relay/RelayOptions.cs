@@ -244,7 +244,14 @@ public sealed class RelayOptions
                 root = new JsonObject();
             }
             var relayNode = EnsureRelay(root);
-            mutateRelay(relayNode);
+            var mutated = mutateRelay(relayNode);
+            if (mutated != null && !ReferenceEquals(mutated, relayNode))
+            {
+                // 整节点替换式 mutator（如 _opts.ToJson() 重序列化）：挂回根节点。
+                // 就地修改式 mutator 返回同一引用，此处无操作。修复：返回值此前被丢弃，
+                // 导致 ToJson() 式写回静默失效（relay 节点写成 {}）。
+                root["relay"] = mutated;
+            }
             WriteAtomic(path, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
             return true;
         }
