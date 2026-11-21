@@ -63,6 +63,8 @@ sealed class DetailForm : Form
     readonly List<Section> _sections;
     bool _reallyExit;
     int _desiredHeight = 588;
+    /// <summary>最近一次 UpdateRelay 收到的快照（右键菜单读 pin 态用）。</summary>
+    RelayStatus? _lastRelayStatus;
 
     /// <summary>用户点击"立即刷新"。</summary>
     public event EventHandler? RefreshRequested;
@@ -72,6 +74,9 @@ sealed class DetailForm : Form
 
     /// <summary>用户点击中转分组头部的「启用/关闭中转」开关。</summary>
     public event EventHandler? RelayToggleRequested;
+
+    /// <summary>用户在渠道行右键菜单选择"强制路由到 {id} / 解除强制"（pin=true 设为强制）。</summary>
+    public event EventHandler<(string ProviderId, bool Pin)>? PinRequested;
 
     public DetailForm()
     {
@@ -116,6 +121,8 @@ sealed class DetailForm : Form
         {
             _lblRelayRows[i] = AddLabel("", 34, 0, W - PageMargin - 34, 20, muted: false, fontSize: 8.5F);
             _lblRelayRows[i].Visible = false;
+            var row = _lblRelayRows[i];
+            row.MouseClick += (s, e) => ShowRelayRowMenu(row, e);
         }
         int W2 = ClientSize.Width;
         _lblRelayHint = AddLabel("", PageMargin, 0, W2 - PageMargin * 2, 32, muted: true, fontSize: 8.5F);
@@ -214,11 +221,13 @@ sealed class DetailForm : Form
         return s;
     }
 
-    /// <summary>渠道行状态文本；返回 (文本, 颜色, 是否当前通道高亮)。</summary>
-    static (string Text, Color Color, bool Current) RelayRowText(ProviderStatus p, string? currentId)
+    /// <summary>渠道行状态文本；返回 (文本, 颜色, 是否当前通道高亮)。
+    /// forcedId 为 sticky pin 强制通道 id：被 pin 行加 "[强制] " 前缀（叠加 ▶ 标记）。</summary>
+    static (string Text, Color Color, bool Current) RelayRowText(ProviderStatus p, string? currentId, string? forcedId)
     {
         var current = p.Id == currentId;
         var mark = current ? "▶ " : "  ";
+        if (p.Id == forcedId) mark += "[强制] ";
         var state = p.State switch
         {
             "normal" => "正常",
@@ -262,6 +271,7 @@ sealed class DetailForm : Form
     /// </summary>
     public void UpdateRelay(RelayStatus? st)
     {
+        _lastRelayStatus = st;
         var running = st is { Running: true };
         _btnRelayToggle.Text = running ? "关闭中转" : "启用中转";
 
@@ -277,6 +287,9 @@ sealed class DetailForm : Form
         var missing = running && st!.Providers.Any(p => p.Enabled && !p.HasKey);
         _btnRelayGuide.Visible = missing;
 
+        // sticky pin 强制通道 id（渲染 [强制] 前缀与右键菜单勾选态）
+        var forcedId = st?.Forced?.Id;
+
         var i = 0;
         if (running)
         {
@@ -288,14 +301,15 @@ sealed class DetailForm : Form
                 lbl.Visible = true;
                 if (p.Enabled && !p.HasKey)
                 {
-                    // 引导文案：缺 key 渠道列待完成项
+                    // 引导文案：缺 key 渠道列待完成项（m8：no-key 行不走 RelayRowText，
+                    // 被 pin 的 no-key 渠道行无 [强制] 前缀属预期；总览横幅仍可见）
                     lbl.Text = $"  {p.Id}：请在 Provider 池填写 API Key";
                     lbl.ForeColor = Colors.Warning;
                     lbl.Font = new Font("Segoe UI", 8.5F);
                 }
                 else
                 {
-                    var (text, color, isCurrent) = RelayRowText(p, st.CurrentId);
+                    var (text, color, isCurrent) = RelayRowText(p, st.CurrentId, forcedId);
                     lbl.Text = text;
                     lbl.ForeColor = color;
                     lbl.Font = new Font("Segoe UI", isCurrent ? 9F : 8.5F, isCurrent ? FontStyle.Bold : FontStyle.Regular);
@@ -309,11 +323,38 @@ sealed class DetailForm : Form
                 _lblRelayRows[^1].Font = new Font("Segoe UI", 8.5F);
             }
         }
-        for (; i < MaxRelayRows; i++)
-        {
-            _lblRelayRows[i].Visible = false;
-        }
         Relayout();
+    }
+
+    /// <summary>
+    /// 渠道行右键 → 上下文菜单：每渠道一项"强制路由到 {id}"（当前 pin 项打勾）+ 分隔 +
+    /// "解除强制"（无 pin 时禁用）。选择经 PinRequested 事件外派（AppContext 订阅）。
+    /// </summary>
+    void ShowRelayRowMenu(Label row, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Right) return;
+        var st = _lastRelayStatus;
+        if (st is not { Running: true }) return;
+        var forcedId = st.Forced?.Id;
+        var menu = new ContextMenuStrip();
+        foreach (var p in st.Providers)
+        {
+            var id = p.Id;
+            var item = new ToolStripMenuItem($"强制路由到 {id}")
+            {
+                Checked = id == forcedId,
+            };
+            item.Click += (_, _) => PinRequested?.Invoke(this, (id, true));
+            menu.Items.Add(item);
+        }
+        menu.Items.Add(new ToolStripSeparator());
+        var unpin = new ToolStripMenuItem("解除强制")
+        {
+            Enabled = forcedId != null,
+        };
+        unpin.Click += (_, _) => PinRequested?.Invoke(this, (forcedId!, false));
+        menu.Items.Add(unpin);
+        menu.Show(row, e.Location);
     }
 
     Label AddLabel(string text, int x, int y, int w, int h, bool muted = false, bool bold = false, float fontSize = 9F, Color? color = null, bool right = false, AnchorStyles anchor = AnchorStyles.Top | AnchorStyles.Left)

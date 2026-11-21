@@ -94,6 +94,11 @@
   .pv-meta { color: var(--muted); font-size: 12px; word-break: break-all; }
   .chip { display: inline-block; background: var(--chip-bg); border: 1px solid var(--line); border-radius: 10px; padding: 0 10px; font-size: 12px; color: var(--text); }
   .pv-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); }
+  .badge.forced { background: var(--accent); color: var(--on-accent); }
+  .pv-card.dragging { opacity: .5; }
+  .pv-card[draggable="true"] { cursor: grab; }
+  /* 强制通道未生效横幅（accent 左边条，复用 nokey 横幅卡片模式） */
+  .forced-banner { border-left: 4px solid var(--accent); }
 </style>
 </head>
 <body>
@@ -333,6 +338,15 @@ async function loadOverview() {
   </div>` : "";
   document.getElementById("ov-banner").innerHTML = banner;
 
+  // sticky pin：/api/overview 的 forced 为单一来源；未生效（active=false）→ 顶部横幅解释回退原因（M3：一律转义）
+  const f = ov.forced || null;
+  const forcedActive = !!(f && f.active);
+  const forcedBanner = (f && !f.active) ? `<div class="card forced-banner">
+    <b>📌 强制通道 ${escapeHtml(f.id)}</b> 当前不可用（${escapeHtml(f.reason || "不可用")}），已按自动规则走 ${escapeHtml(ov.currentId || "–")}
+    <button class="act danger" onclick="unpinForced()">解除强制</button>
+  </div>` : "";
+  document.getElementById("ov-banner").innerHTML = banner + forcedBanner;
+
   const cards = (ov.providers || []).map(p => {
     let extra = "";
     if (p.state === "cooldown") extra = `${p.cooldownReason || ""} · 剩余 ${p.cooldownRemainingSec}s`;
@@ -348,9 +362,11 @@ async function loadOverview() {
     return `<div class="card">
       <div class="row" style="justify-content:space-between">
         <div class="row">
-          <b>${p.id}</b>
+          <b>${escapeHtml(p.id)}</b>
           <span class="badge ${p.state}">${stateText(p.state)}</span>
           ${ov.currentId === p.id ? '<span class="muted">← 当前通道</span>' : ""}
+          ${f && f.id === p.id && forcedActive ? '<span class="badge forced">📌 强制通道</span>' : ""}
+          ${f && f.id === p.id && !forcedActive ? `<span class="badge forced" title="已按自动规则">📌 强制通道（${escapeHtml(f.reason || "不可用")}）</span>` : ""}
           ${p.enabled ? "" : '<span class="badge off">已停用</span>'}
         </div>
         <span class="muted">优先级 ${p.priority} · 探测 ${p.probe}</span>
@@ -369,33 +385,149 @@ async function loadOverview() {
 
 function escapeHtml(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
 
+async function unpinForced() {
+  const ov = await api("/api/overview").catch(() => null);
+  const id = ov && ov.forced && ov.forced.id;
+  if (!id) return;
+  try {
+    await api(`/api/providers/${encodeURIComponent(id)}/pin`, { method: "DELETE" });
+    await loadOverview();
+  } catch (e) { /* 横幅随下次轮询收敛 */ }
+}
+
 // ────────── Provider 池 ──────────
+let _forcedId = null;    // sticky pin 强制通道 id（M2：单一来源 /api/overview 的 forced.id）
+let _pvOrder = [];       // 拖拽前顺序快照（回滚与"无变化跳过"判据）
+
+// pin 态渲染辅助：本卡是否被 pin / 按钮文案
+function pvPinBadge(p) {
+  return _forcedId === p.id ? '<span class="badge forced">📌 强制</span>' : "";
+}
+function pvPinButton(p) {
+  const pinned = _forcedId === p.id;
+  return `<button class="act ${pinned ? "danger" : ""}" data-action="pin" data-id="${escapeHtml(p.id)}">${pinned ? "取消强制" : "设为强制"}</button>`;
+}
+
 async function loadProviders() {
-  const data = await api("/api/providers");
+  const [data, ov] = await Promise.all([api("/api/providers"), api("/api/overview")]); // M2：并行拉 pin 态
+  _forcedId = (ov && ov.forced && ov.forced.id) || null;
   const list = data.providers || [];
-  const cards = list.map(p => `<div class="pv-card">
+  _pvOrder = list.map(p => p.id); // 拖拽前顺序快照（ESC 取消/失败回滚判据）
+  const cards = list.map(p => `<div class="pv-card" draggable="true" data-id="${escapeHtml(p.id)}">
     <div class="pv-head">
-      <span class="pv-id">${p.id}</span>
+      <span class="pv-id">${escapeHtml(p.id)}</span>
       <span class="badge prio">优先级 ${p.priority}</span>
       <span class="badge ${p.enabled ? "normal" : "off"}">${p.enabled ? "启用" : "停用"}</span>
       <span class="muted">探测 ${p.probe}</span>
+      ${pvPinBadge(p)}
     </div>
     ${p.name ? `<div class="pv-name">${escapeHtml(p.name)}</div>` : ""}
     <div class="pv-meta" style="margin-top:8px">baseURL：<b>${escapeHtml(p.baseURL)}</b></div>
     <div class="pv-meta">apiKey：${p.apiKey ? escapeHtml(p.apiKey) : "（复用全局）"}</div>
     <div class="row" style="gap:6px;margin-top:6px">${(p.models || []).map(m => `<span class="chip">${escapeHtml(m)}</span>`).join("") || '<span class="muted">未配置模型</span>'}</div>
     <div class="pv-actions">
-      <button class="act" onclick="moveProvider('${p.id}','up')">↑</button>
-      <button class="act" onclick="moveProvider('${p.id}','down')">↓</button>
-      <button class="act" onclick="toggleProvider('${p.id}',${!p.enabled})">${p.enabled ? "停用" : "启用"}</button>
-      <button class="act" onclick="testProvider('${p.id}', this)">测试</button>
-      <button class="act" onclick="editProvider('${p.id}')">编辑</button>
-      <button class="act danger" onclick="deleteProvider('${p.id}')">删除</button>
+      <button class="act" data-action="up" data-id="${escapeHtml(p.id)}">↑</button>
+      <button class="act" data-action="down" data-id="${escapeHtml(p.id)}">↓</button>
+      <button class="act" data-action="toggle" data-id="${escapeHtml(p.id)}" data-enabled="${!p.enabled}">${p.enabled ? "停用" : "启用"}</button>
+      <button class="act" data-action="test" data-id="${escapeHtml(p.id)}">测试</button>
+      <button class="act" data-action="edit" data-id="${escapeHtml(p.id)}">编辑</button>
+      <button class="act danger" data-action="del" data-id="${escapeHtml(p.id)}">删除</button>
+      ${pvPinButton(p)}
     </div>
   </div>`).join("");
   document.getElementById("pv-table").innerHTML =
     cards || '<div class="muted">渠道池为空</div>';
 }
+
+// ── 池卡片操作：事件委托（M3：规避内联 onclick 单引号 JS 字符串注入上下文）──
+document.getElementById("pv-table").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-action]");
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const act = btn.dataset.action;
+  if (act === "up") moveProvider(id, "up");
+  else if (act === "down") moveProvider(id, "down");
+  else if (act === "toggle") toggleProvider(id, btn.dataset.enabled === "true");
+  else if (act === "test") testProvider(id, btn);
+  else if (act === "edit") editProvider(id);
+  else if (act === "del") deleteProvider(id);
+  else if (act === "pin") toggleForced(id);
+});
+
+async function toggleForced(id) {
+  const pinning = _forcedId !== id; // 本卡未被 pin → 设为强制（含替换 pin）；已 pin → 取消
+  try {
+    await api(`/api/providers/${encodeURIComponent(id)}/pin`, { method: pinning ? "POST" : "DELETE" });
+    await loadProviders();
+  } catch (e) { showMsg("pv-msg", e.message, false); }
+}
+
+// ── 拖拽调优先级（HTML5 DnD live 预览；仅 dragend 单点收口，drop 仅 preventDefault）──
+// n3 ESC 取消语义：dragstart 记录拖起位置；dragend 时若 drop 未发生（escaped 标志）或
+// 拖起后顺序未变 → 按快照重渲染回滚，绝不 POST。
+let _pvDrag = null; // { id, started } —— started 在首次 dragend 后置 true，区分"drop 已发生"
+let _pvEscaped = false;
+window.addEventListener("keydown", e => {
+  if (e.key === "Escape" && _pvDrag) _pvEscaped = true;
+});
+const pvTable = document.getElementById("pv-table");
+pvTable.addEventListener("dragstart", e => {
+  const card = e.target.closest(".pv-card");
+  if (!card) return;
+  _pvDrag = { id: card.dataset.id, started: false };
+  _pvEscaped = false;
+  e.dataTransfer.setData("text/plain", card.dataset.id);
+  e.dataTransfer.effectAllowed = "move";
+  card.classList.add("dragging");
+});
+pvTable.addEventListener("dragover", e => {
+  const dragging = pvTable.querySelector(".pv-card.dragging");
+  if (!dragging) return;
+  e.preventDefault(); // 必调，否则不允许 drop
+  e.dataTransfer.dropEffect = "move";
+  const card = e.target.closest(".pv-card");
+  if (!card || card === dragging) {
+    // 容器级兜底（m2）：越过最后一张卡中线 → 插到末尾（否则末位不可达）
+    const cards = Array.from(pvTable.querySelectorAll(".pv-card:not(.dragging)"));
+    const last = cards[cards.length - 1];
+    if (last && e.clientY > last.getBoundingClientRect().top + last.getBoundingClientRect().height / 2) {
+      pvTable.appendChild(dragging);
+    }
+    return;
+  }
+  const rect = card.getBoundingClientRect();
+  const after = e.clientY > rect.top + rect.height / 2; // 鼠标越过中线 → 插到该卡之后
+  if (after) card.after(dragging);
+  else card.before(dragging);
+});
+pvTable.addEventListener("drop", e => {
+  e.preventDefault(); // 仅允许放置；收口只在 dragend（m2，防双重 POST）
+  if (_pvDrag) _pvDrag.started = true; // drop 发生 → 本次拖拽按落定顺序收口
+});
+pvTable.addEventListener("dragend", async e => {
+  const dragging = pvTable.querySelector(".pv-card.dragging");
+  _pvDrag = null;
+  if (!dragging) return;
+  dragging.classList.remove("dragging");
+  const ids = Array.from(pvTable.querySelectorAll(".pv-card")).map(c => c.dataset.id);
+  if (_pvEscaped) {
+    _pvEscaped = false;
+    // ESC 取消拖拽：回滚快照顺序（_pvOrder），不触发 POST
+    if (ids.join("\n") !== _pvOrder.join("\n")) await loadProviders();
+    return;
+  }
+  if (ids.join("\n") === _pvOrder.join("\n")) return; // 顺序未变（纯晃了一下）→ 无操作
+  try {
+    await api("/api/providers/reorder", {
+      method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, hdrs()),
+      body: JSON.stringify({ ids }),
+    });
+    await loadProviders();
+  } catch (err) {
+    showMsg("pv-msg", err.message, false);
+    await loadProviders(); // 失败按快照回滚重渲染（_pvOrder 即拖前顺序）
+  }
+});
 
 let _editing = null; // null=新建
 async function editProvider(id) {

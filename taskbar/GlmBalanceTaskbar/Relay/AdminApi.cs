@@ -126,6 +126,48 @@ public sealed class AdminApi
             return;
         }
 
+        // 全量重排优先级（M1：置于 404 前置之前、与 import 同级——若放在 switch(segments[3])
+        // 自然位置则永不可达；"reorder" 由此成为渠道 id 保留字：POST /api/providers/reorder 被
+        // 本端点拦截（现状该路径为 404 not_found，无既有功能破坏），对该渠道的
+        // PUT/GET/DELETE /api/providers/reorder 不受影响）
+        if (segments.Length == 3 && segments[2] == "reorder" && method == "POST")
+        {
+            var body = await ReadJsonAsync(req).ConfigureAwait(false);
+            var idsNode = body?["ids"] as JsonArray;
+            if (idsNode == null) { await WriteAsync(rsp, 400, "{\"error\":\"缺少 ids 数组\"}").ConfigureAwait(false); return; }
+            var ids = idsNode.Where(n => n != null).Select(n => n!.ToString()).ToList();
+
+            // 全排列校验：数量相等、无重复、无未知 id；空池+空数组 → 200 空操作（m7），
+            // 非空池+空数组 → 400
+            var snapshot = _mgr.ProvidersSnapshot();
+            var poolIds = snapshot.Select(p => p.Id).ToList();
+            var valid = ids.Count == poolIds.Count
+                && ids.Distinct(StringComparer.Ordinal).Count() == ids.Count
+                && ids.All(id => poolIds.Contains(id));
+            if (!valid)
+            {
+                await WriteAsync(rsp, 400, "{\"error\":\"ids 必须恰好包含全部渠道 id（无重复、无缺失）\"}").ConfigureAwait(false);
+                return;
+            }
+
+            // 按 ids 重排 + Priority 重编号 1..n（与 NextPriority/max+1 及 move 相邻交换兼容）
+            _mgr.MutateProviders(list =>
+            {
+                var byId = list.ToDictionary(p => p.Id, StringComparer.Ordinal);
+                var reordered = ids.Select(id => byId[id]).ToList();
+                list.Clear();
+                list.AddRange(reordered);
+                for (var i = 0; i < list.Count; i++)
+                {
+                    list[i].Priority = i + 1;
+                }
+                return true;
+            });
+            var ok = _mgr.PersistAndApply(relay => ReplaceProviders(relay, _mgr.ProvidersSnapshot()), warnings);
+            await WriteAsync(rsp, ok ? 200 : 500, RelayJson.Serialize(new { ok, warnings })).ConfigureAwait(false);
+            return;
+        }
+
         // 其余均需 {id}
         var providerId = segments.Length >= 3 ? Uri.UnescapeDataString(segments[2]) : "";
         var rt = _mgr.Pool.FirstOrDefault(p => string.Equals(p.Id, providerId, StringComparison.Ordinal));
@@ -136,6 +178,26 @@ public sealed class AdminApi
             case "" when method == "GET":
                 await WriteAsync(rsp, 200, RelayJson.Serialize(ProviderToJson(rt!))).ConfigureAwait(false);
                 return;
+
+            case "pin" when method == "POST": // 设为强制通道（sticky pin，运行时单槽，不写文件）
+            {
+                // SetForced 以池内存在为权威校验：false = 渠道不在池（含前置 404 后池被重建的
+                // 极小竞态，m5）→ 与前置同语义 404
+                if (!_mgr.Router.SetForced(providerId))
+                {
+                    await WriteAsync(rsp, 404, "{\"error\":\"渠道不存在\"}").ConfigureAwait(false);
+                    return;
+                }
+                await WriteAsync(rsp, 200, RelayJson.Serialize(new { ok = true, forcedId = providerId })).ConfigureAwait(false);
+                return;
+            }
+
+            case "pin" when method == "DELETE": // 解除强制（幂等；pin 指向其他 id 时不清除）
+            {
+                _mgr.Router.ClearForced(providerId);
+                await WriteAsync(rsp, 200, RelayJson.Serialize(new { ok = true, forcedId = (string?)null })).ConfigureAwait(false);
+                return;
+            }
 
             case "" when method == "PUT": // 新建或更新（key 只写不读）
             {
@@ -183,6 +245,8 @@ public sealed class AdminApi
             {
                 if (rt == null) { await WriteAsync(rsp, 404, "{\"error\":\"渠道不存在\"}").ConfigureAwait(false); return; }
                 _mgr.MutateProviders(list => list.RemoveAll(p => p.Id == rt.Id) > 0);
+                // 删除被 pin 渠道 → 连带清 pin（R4 双保险之一；ReplacePool 另有防御性校验）
+                if (_mgr.Router.ForcedId == rt.Id) _mgr.Router.ClearForced(rt.Id);
                 var ok = _mgr.PersistAndApply(relay => ReplaceProviders(relay, _mgr.ProvidersSnapshot()), warnings);
                 await WriteAsync(rsp, ok ? 200 : 500,
                     RelayJson.Serialize(new { ok, warnings, message = ok ? $"已删除 {rt.Id} 并生效" : "写回失败" })).ConfigureAwait(false);

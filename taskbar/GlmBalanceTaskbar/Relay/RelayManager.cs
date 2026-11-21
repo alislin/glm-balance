@@ -415,7 +415,33 @@ public sealed class RelayManager : IDisposable
             req, fail,
             _authDisabled, false,
             providers, _router.ModelUnion(),
-            Dev: DevMode.IsDev);
+            Dev: DevMode.IsDev,
+            Forced: BuildForcedStatus(now));
+    }
+
+    /// <summary>
+    /// 组装 sticky pin 强制通道快照（无 pin → null，序列化省略，/status 形状逐字节不变）。
+    /// Active = pin 渠道当前可路由（Enabled ∧ 有 key ∧ 状态 Normal）；false 时给中文短因。
+    /// </summary>
+    ForcedRouteStatus? BuildForcedStatus(DateTimeOffset now)
+    {
+        var forcedId = _router.ForcedId;
+        if (forcedId == null) return null;
+        var rt = _router.Pool().FirstOrDefault(p => p.Id == forcedId);
+        if (rt == null) return null; // ReplacePool 已防御清 pin，此为极小竞态兜底
+        var ins = rt.Inspect(now);
+        var active = rt.Config.Enabled && rt.ResolvedKey != null && ins.State == ProviderState.Normal;
+        if (active) return new ForcedRouteStatus(forcedId, Active: true, Reason: null);
+        var reason = ins.State switch
+        {
+            ProviderState.Cooldown => $"冷却 {ins.CooldownRemainingSec ?? 0}s",
+            ProviderState.Degraded when ins.DegradedReason != null => $"degraded：{ins.DegradedReason}",
+            ProviderState.Degraded => "degraded",
+            ProviderState.DisabledNoKey => "无 key",
+            _ => null,
+        };
+        if (!rt.Config.Enabled) reason = "已停用";
+        return new ForcedRouteStatus(forcedId, Active: false, Reason: reason ?? "不可用");
     }
 
     static bool Resolved(ProviderRuntime rt) => rt.ResolvedKey != null;
@@ -510,7 +536,10 @@ public sealed class RelayManager : IDisposable
 
     // ─────────────────────────── 托盘/详情窗摘要 ───────────────────────────
 
-    /// <summary>托盘悬停"中转"行：正常 / 异常 / degraded / 已关闭。已停用与 no-key 渠道不参与首选通道判定（F10）。</summary>
+    /// <summary>托盘悬停"中转"行：正常 / 异常 / degraded / 已关闭。已停用与 no-key 渠道不参与首选通道判定（F10）。
+    /// pin 分支置于既有 current==null 短路之后（n1：全渠道不可用时先走"无可用渠道"，不 NRE）；
+    /// pin 生效直接返回 [强制] 行、跳过既有 preferred≠current 解释分支（m1，不叠加）；
+    /// pin 未生效给出"已按自动规则"回退说明；无 pin 时现状逻辑逐字不变。</summary>
     public string PreviewLine()
     {
         if (!Running) return "中转  已关闭";
@@ -522,6 +551,34 @@ public sealed class RelayManager : IDisposable
             .FirstOrDefault();
         var current = _router.Current(now);
         if (current == null) return "中转  无可用渠道";
+        var forcedId = _router.ForcedId;
+        if (forcedId != null)
+        {
+            var forcedRt = pool.FirstOrDefault(rt => rt.Id == forcedId);
+            if (forcedRt != null && forcedRt.Inspect(now).State == ProviderState.Normal
+                && forcedRt.Config.Enabled && forcedRt.ResolvedKey != null)
+            {
+                // pin 生效：current 即 pin 渠道，直接给 [强制] 行，跳过 preferred≠current 解释分支
+                var fins = forcedRt.Inspect(now);
+                return fins.State switch
+                {
+                    ProviderState.Degraded => $"中转  [强制] {forcedId} · degraded：{fins.DegradedReason ?? (fins.RemainingPct is { } fp ? $"剩余 {fp}%" : "用量低")}",
+                    _ => $"中转  [强制] {forcedId} · 正常",
+                };
+            }
+            // pin 未生效（冷却/降级/停用）→ 让位自动规则，说明原因
+            var freason = forcedRt == null
+                ? "渠道已移除"
+                : !forcedRt.Config.Enabled ? "已停用"
+                : forcedRt.Inspect(now).State switch
+                {
+                    ProviderState.Cooldown => $"冷却 {forcedRt.CooldownRemaining(now) ?? 0}s",
+                    ProviderState.Degraded when forcedRt.Inspect(now).DegradedReason != null => $"degraded：{forcedRt.Inspect(now).DegradedReason}",
+                    ProviderState.Degraded => "degraded",
+                    _ => "不可用",
+                };
+            return $"中转  {current.Id}（强制通道 {forcedId} {freason}，已按自动规则）";
+        }
         if (preferred != null && preferred.Id != current.Id)
         {
             var ins = preferred.Inspect(now);

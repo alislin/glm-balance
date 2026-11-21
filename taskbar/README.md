@@ -187,6 +187,32 @@ opencode (localrelay provider) ──http://127.0.0.1:8787/v1──▶ GlmBalanc
 | `GET /admin` | 免 | 管理面板（五 Tab：总览 / Provider 池 / 日志 / 部署 / 设置） |
 | `/api/*` | Bearer localToken | 管理 JSON API（provider CRUD / move / test / import、agents deploy、settings、logs；key 只写不读，响应一律掩码） |
 
+### 强制通道与拖拽调序（API 用法）
+
+sticky pin 强制通道：把流量固定路由到指定渠道，直到手动解除；渠道不可路由（冷却/降级/停用）
+时自动让位既有优先级规则，恢复后 pin 自动重新生效。运行时单槽意图——不写配置文件、重启失效；
+删除被 pin 的渠道时自动清除。拖拽调序经同一组管理 API 全量重排并持久化（Priority 重编号 1..n）。
+
+```sh
+# 设 A 为强制通道（幂等；渠道不存在 → 404）
+curl -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/api/providers/A/pin
+
+# 解除强制（幂等；pin 指向其他渠道时不清除）
+curl -X DELETE -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/api/providers/A/pin
+
+# 查看：/status（含 /api/overview）仅在存在 pin 时多出 forced 字段（无 pin 时响应形状不变）
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/status
+# → { ..., "forced": { "id": "A", "active": true, "reason": null } }
+
+# 全量重排优先级（ids 必须恰好为全部渠道 id；Priority 重编号 1..n 并写回配置）
+curl -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/api/providers/reorder \
+  -H "Content-Type: application/json" -d '{"ids":["B","A"]}'
+```
+
+UI 入口：admin 面板 Provider 池卡片「设为强制/取消强制」按钮与卡片拖拽（live 预览，
+ESC 取消回滚）；总览顶部横幅在强制通道不可用时给出原因与一键解除；托盘详情窗渠道行
+右键菜单同样可切换/解除强制，悬停浮窗显示 `[强制]` 状态。
+
 ### opencode 对接
 
 1. 启动程序后打开管理面板（托盘菜单「管理面板」或 `http://127.0.0.1:8787/admin`），在「部署」Tab 生成预览并写入；或在「Provider 池」Tab 从发现列表核对渠道。

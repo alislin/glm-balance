@@ -37,6 +37,15 @@ sealed class AppContext : ApplicationContext
         _form.RefreshRequested += (_, _) => _ = RefreshAsync(force: true);
         _form.PanelRequested += (_, _) => OpenAdminPanel();
         _form.RelayToggleRequested += (_, _) => _ = ToggleRelayAsync();
+        // sticky pin 强制通道：托盘右键菜单外派 → 路由器置/清 pin → 立即刷新详情窗中转分组
+        _form.PinRequested += (_, e) =>
+        {
+            var relay = _relay;
+            if (relay == null) return;
+            if (e.Pin) relay.Router.SetForced(e.ProviderId);
+            else relay.Router.ClearForced(e.ProviderId);
+            _form.UpdateRelay(relay.Snapshot());
+        };
 
         // 中转：始终构造管理器（未初始化/显式关闭时开关与面板入口仍可用，消除静默无反应）；
         // 仅 enabled=true 时启动；启动失败只记 warnings，配额显示不受影响。
