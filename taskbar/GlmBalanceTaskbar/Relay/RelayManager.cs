@@ -554,26 +554,25 @@ public sealed class RelayManager : IDisposable
         var forcedId = _router.ForcedId;
         if (forcedId != null)
         {
+            // F4：入口取一次 Inspect 复用全分支（对齐 BuildForcedStatus 单次 Inspect 范式）
             var forcedRt = pool.FirstOrDefault(rt => rt.Id == forcedId);
-            if (forcedRt != null && forcedRt.Inspect(now).State == ProviderState.Normal
-                && forcedRt.Config.Enabled && forcedRt.ResolvedKey != null)
+            var fins = forcedRt?.Inspect(now);
+            var forcedActive = forcedRt != null && fins!.State == ProviderState.Normal
+                && forcedRt.Config.Enabled && forcedRt.ResolvedKey != null;
+            if (forcedActive)
             {
-                // pin 生效：current 即 pin 渠道，直接给 [强制] 行，跳过 preferred≠current 解释分支
-                var fins = forcedRt.Inspect(now);
-                return fins.State switch
-                {
-                    ProviderState.Degraded => $"中转  [强制] {forcedId} · degraded：{fins.DegradedReason ?? (fins.RemainingPct is { } fp ? $"剩余 {fp}%" : "用量低")}",
-                    _ => $"中转  [强制] {forcedId} · 正常",
-                };
+                // pin 生效：current 即 pin 渠道，直接给 [强制] 行，跳过 preferred≠current 解释分支。
+                // 仅 Normal 可达（Current 的 pin 候选判 IsRoutable），无其他状态 arm。
+                return $"中转  [强制] {forcedId} · 正常";
             }
-            // pin 未生效（冷却/降级/停用）→ 让位自动规则，说明原因
+            // pin 未生效（冷却/降级/停用/极小竞态已移除）→ 让位自动规则，说明原因
             var freason = forcedRt == null
                 ? "渠道已移除"
                 : !forcedRt.Config.Enabled ? "已停用"
-                : forcedRt.Inspect(now).State switch
+                : fins!.State switch
                 {
                     ProviderState.Cooldown => $"冷却 {forcedRt.CooldownRemaining(now) ?? 0}s",
-                    ProviderState.Degraded when forcedRt.Inspect(now).DegradedReason != null => $"degraded：{forcedRt.Inspect(now).DegradedReason}",
+                    ProviderState.Degraded when fins.DegradedReason != null => $"degraded：{fins.DegradedReason}",
                     ProviderState.Degraded => "degraded",
                     _ => "不可用",
                 };

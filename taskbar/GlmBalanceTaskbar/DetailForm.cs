@@ -323,6 +323,13 @@ sealed class DetailForm : Form
                 _lblRelayRows[^1].Font = new Font("Segoe UI", 8.5F);
             }
         }
+        // 隐藏多余行（F1 回归修复：补回改前基线循环）——中转停止后渠道 Label 残留旧文本、
+        // 渠道减少/池收缩后多余行与 `…共 N 个渠道` 行残留均由该复位消除；
+        // Row 高度委托 `Visible ? 20 : 0` 依赖此复位。
+        for (; i < MaxRelayRows; i++)
+        {
+            _lblRelayRows[i].Visible = false;
+        }
         Relayout();
     }
 
@@ -354,6 +361,7 @@ sealed class DetailForm : Form
         };
         unpin.Click += (_, _) => PinRequested?.Invoke(this, (forcedId!, false));
         menu.Items.Add(unpin);
+        menu.Closed += (_, _) => menu.Dispose(); // F2：用后即弃，避免每次右键泄漏一个菜单
         menu.Show(row, e.Location);
     }
 

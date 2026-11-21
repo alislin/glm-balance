@@ -336,8 +336,6 @@ async function loadOverview() {
     </ol>
     <button class="act primary" onclick="gotoTab('providers')">打开 Provider 池填写</button>
   </div>` : "";
-  document.getElementById("ov-banner").innerHTML = banner;
-
   // sticky pin：/api/overview 的 forced 为单一来源；未生效（active=false）→ 顶部横幅解释回退原因（M3：一律转义）
   const f = ov.forced || null;
   const forcedActive = !!(f && f.active);
@@ -463,9 +461,9 @@ async function toggleForced(id) {
 }
 
 // ── 拖拽调优先级（HTML5 DnD live 预览；仅 dragend 单点收口，drop 仅 preventDefault）──
-// n3 ESC 取消语义：dragstart 记录拖起位置；dragend 时若 drop 未发生（escaped 标志）或
-// 拖起后顺序未变 → 按快照重渲染回滚，绝不 POST。
-let _pvDrag = null; // { id, started } —— started 在首次 dragend 后置 true，区分"drop 已发生"
+// n3 ESC 取消语义：经 _pvEscaped 标志取消（keydown Escape），dragend 时按快照重渲染
+// 回滚、绝不 POST；其余（正常落定）按落定顺序即提交。
+let _pvDrag = null; // 仅作"拖拽进行中"哨兵（keydown 判据），无其他状态
 let _pvEscaped = false;
 window.addEventListener("keydown", e => {
   if (e.key === "Escape" && _pvDrag) _pvEscaped = true;
@@ -474,7 +472,7 @@ const pvTable = document.getElementById("pv-table");
 pvTable.addEventListener("dragstart", e => {
   const card = e.target.closest(".pv-card");
   if (!card) return;
-  _pvDrag = { id: card.dataset.id, started: false };
+  _pvDrag = true; // 拖拽进行中（ESC 判据哨兵）
   _pvEscaped = false;
   e.dataTransfer.setData("text/plain", card.dataset.id);
   e.dataTransfer.effectAllowed = "move";
@@ -502,7 +500,6 @@ pvTable.addEventListener("dragover", e => {
 });
 pvTable.addEventListener("drop", e => {
   e.preventDefault(); // 仅允许放置；收口只在 dragend（m2，防双重 POST）
-  if (_pvDrag) _pvDrag.started = true; // drop 发生 → 本次拖拽按落定顺序收口
 });
 pvTable.addEventListener("dragend", async e => {
   const dragging = pvTable.querySelector(".pv-card.dragging");
