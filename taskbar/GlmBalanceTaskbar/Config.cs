@@ -16,16 +16,23 @@ public sealed class AppConfig
     public int ActivityType { get; set; } = 3;
     /// <summary>中转配置段；null = "relay" 缺省或解析失败（中转关闭，原功能零影响）。</summary>
     public RelayOptions? Relay { get; set; }
+
+    /// <summary>
+    /// devMock 配置段（仅 --dev 语义使用；生产 Load 不读该键，JSON 未知键自动忽略，生产零影响）。
+    /// 生产配置文件里即便写了 devMock 也只是被忽略的未知键。
+    /// </summary>
+    public DevMockOptions? DevMock { get; set; }
+
     public List<string> Warnings { get; } = new();
 
     /// <summary>
     /// 配置来源（优先级从高到低）：
-    /// 1. exe 同目录 glmbalance-taskbar.json
+    /// 1. <paramref name="configDir"/>（null = 现状：exe 同目录；--dev 传 DevMode.ConfigRoot）下的 glmbalance-taskbar.json
     /// 2. ~/.local/share/opencode/auth.json（API key，同 e2e-check.ts）
     /// 3. ~/.config/opencode/opencode.json（provider apiKey / baseURL）
     /// 4. ~/.config/opencode/tui.json（glm-balance 插件条目的 organization / project 等选项，同 deploy.mjs 匹配规则）
     /// </summary>
-    public static AppConfig Load()
+    public static AppConfig Load(string? configDir = null)
     {
         var cfg = new AppConfig();
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -36,9 +43,11 @@ public sealed class AppConfig
         bool? tuiActivity = null;
         bool ovActivity = false, ovActivityType = false, ovBaseSet = false;
 
-        // 1) 本地覆盖：exe 同目录 glmbalance-taskbar.json
+        // 1) 本地覆盖：configDir 指定目录（null = 现状 exe 同目录；dev = DevMode.ConfigRoot）下 glmbalance-taskbar.json
         var overridePath = Path.Combine(
-            Path.GetDirectoryName(Environment.ProcessPath ?? Environment.GetCommandLineArgs()[0]) ?? ".",
+            configDir ??
+            Path.GetDirectoryName(Environment.ProcessPath ?? Environment.GetCommandLineArgs()[0]) ??
+            ".",
             "glmbalance-taskbar.json");
         using (var ov = TryReadJson(overridePath, cfg.Warnings))
         {
@@ -57,6 +66,31 @@ public sealed class AppConfig
 
                 // relay 段：整体缺省 → null（中转关闭）；解析失败 → warnings + 中转关闭
                 cfg.Relay = RelayOptions.Parse(r, cfg.Warnings);
+
+                // devMock 段（仅 dev 语义；生产配置即便写了也被忽略，不影响生产行为）
+                if (r.Prop("devMock") is { ValueKind: JsonValueKind.Object } dm)
+                {
+                    var mo = new DevMockOptions();
+                    mo.UpstreamPort = (int?)dm.Prop("upstreamPort").Num() ?? DevMode.DefaultMockUpstreamPort;
+                    mo.ChatContent = dm.Prop("chatContent").Str() ?? mo.ChatContent;
+                    mo.LatencyMs = (int?)dm.Prop("latencyMs").Num() ?? 50;
+                    mo.FiveHourRemainingPct = (int?)dm.Prop("quota").Prop("fiveHourRemainingPct").Num() is { } q5 ? Math.Clamp(q5, 0, 100) : 80;
+                    mo.WeekRemainingPct = (int?)dm.Prop("quota").Prop("weekRemainingPct").Num() is { } qw ? Math.Clamp(qw, 0, 100) : 60;
+                    if (dm.Prop("providers") is { ValueKind: JsonValueKind.Object } ps)
+                    {
+                        foreach (var e in ps.EnumerateObject())
+                        {
+                            var v = e.Value;
+                            mo.Providers[e.Name] = new DevMockProviderRules
+                            {
+                                ChatStatus = (int?)v.Prop("chatStatus").Num() ?? 200,
+                                ModelsStatus = (int?)v.Prop("modelsStatus").Num() ?? 200,
+                                StreamBreak = v.Prop("streamBreak").BoolVal() ?? false,
+                            };
+                        }
+                    }
+                    cfg.DevMock = mo;
+                }
             }
         }
 

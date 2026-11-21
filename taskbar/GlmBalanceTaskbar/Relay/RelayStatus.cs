@@ -1,5 +1,7 @@
 namespace GlmBalanceTaskbar;
 
+using System.Text.Json.Serialization;
+
 /// <summary>渠道状态快照（WinForms / /status / admin 共用；不含 key）。</summary>
 public sealed record ProviderStatus(
     string Id,
@@ -24,7 +26,9 @@ public sealed record ProviderStatus(
     long FailCount,
     double AvgLatencyMs);
 
-/// <summary>中转服务整体状态快照（Initialized：配置存在 relay 段；false = 未初始化引导态）。</summary>
+/// <summary>中转服务整体状态快照（Initialized：配置存在 relay 段；false = 未初始化引导态）。
+/// Dev：--dev 实例标记（N1 裁决：属性级 WhenWritingDefault 忽略——生产（false）序列化省略字段、
+/// dev（true）携带；不改全局 RelayJson.Options，生产 /status 响应形状逐字节不变）。</summary>
 public sealed record RelayStatus(
     bool Running,
     bool Enabled,
@@ -38,4 +42,5 @@ public sealed record RelayStatus(
     bool AuthDisabled,
     bool SeededDefaults,
     IReadOnlyList<ProviderStatus> Providers,
-    IReadOnlyList<string> Models);
+    IReadOnlyList<string> Models,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] bool Dev = false);

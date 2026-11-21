@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 
@@ -5,14 +6,31 @@ namespace GlmBalanceTaskbar;
 
 static class Program
 {
-    const string MutexName = @"Local\GlmBalanceTaskbar.SingleInstance";
-    const string ShowEventName = @"Local\GlmBalanceTaskbar.ShowWindow";
+    /// <summary>
+    /// 单实例互斥体 / 窗口恢复事件 / AUMID：改为经 DevMode 派生属性取值（单一派生点，§2.2）。
+    /// 不带 --dev 时派生属性返回值与原常量逐字节一致（G6）。生产常量仍保留在
+    /// DevMode 内的对照位置；此处不再直接引用常量名。
+    /// </summary>
+    const string ProductionMutexName = @"Local\GlmBalanceTaskbar.SingleInstance";
+    const string ProductionShowEventName = @"Local\GlmBalanceTaskbar.ShowWindow";
 
     /// <summary>
     /// 显式 AUMID：固定到任务栏的快捷方式携带相同 ID 时，运行实例的动态图标（数字）才会被
     /// 固定按钮采用（隐式 exe 路径匹配时 Win11 固定按钮只显示静态快捷方式图标）。
     /// </summary>
-    const string AppUserModelId = "AlisL.GlmBalanceTaskbar";
+    const string ProductionAppUserModelId = "AlisL.GlmBalanceTaskbar";
+
+    /// <summary>编译期防漂移护栏：生产派生值与上方原常量逐字节一致（G6 走查锚点）。</summary>
+    [Conditional("DEBUG")]
+    static void AssertProductionIdentifiersUnchanged()
+    {
+        if (!DevMode.IsDev)
+        {
+            if (!DevMode.MutexName.Equals(ProductionMutexName, StringComparison.Ordinal)) throw new InvalidOperationException("MutexName 漂移");
+            if (!DevMode.ShowEventName.Equals(ProductionShowEventName, StringComparison.Ordinal)) throw new InvalidOperationException("ShowEventName 漂移");
+            if (!DevMode.Aumid.Equals(ProductionAppUserModelId, StringComparison.Ordinal)) throw new InvalidOperationException("AUMID 漂移");
+        }
+    }
 
     [DllImport("shell32.dll", SetLastError = true)]
     private static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string appID);
@@ -20,6 +38,10 @@ static class Program
     [STAThread]
     static int Main(string[] args)
     {
+        // --dev 必须最先解析（在 --once / --dump-icon / --relay-init 判定之前，组合语义才生效）
+        DevMode.Initialize(args);
+        AssertProductionIdentifiersUnchanged();
+
         if (args.Any(a => a.Equals("--once", StringComparison.OrdinalIgnoreCase)))
         {
             return RunOnce();
@@ -39,13 +61,13 @@ static class Program
         ApplicationConfiguration.Initialize();
         TrySetAppUserModelId();
 
-        using var mutex = new Mutex(true, MutexName, out bool createdNew);
+        using var mutex = new Mutex(true, DevMode.MutexName, out bool createdNew);
         if (!createdNew)
         {
             // 已有实例：通知其恢复窗口后退出
             try
             {
-                using var evt = EventWaitHandle.OpenExisting(ShowEventName);
+                using var evt = EventWaitHandle.OpenExisting(DevMode.ShowEventName);
                 evt.Set();
             }
             catch
@@ -55,10 +77,31 @@ static class Program
             return 0;
         }
 
-        var cfg = AppConfig.Load();
+        // dev：配置读 %LOCALAPPDATA%\GlmBalanceTaskbar-dev\（生产 exe 同目录那份零读写）；生产：现状
+        var cfg = AppConfig.Load(DevMode.IsDev ? DevMode.ConfigRoot : null);
+        if (DevMode.IsDev)
+        {
+            // dev 配置合成（第 1 层覆写，便利层）：mock 端口合成 → relay 默认端口 → mock 覆写
+            DevMode.ApplyDevRelayDefaults(cfg);
+            DevMode.ApplyMockOverrides(cfg);
+            cfg.Warnings.AddRange(DevMode.DrainWarnings());
+
+            // 启动进程内 mock upstream（8789）。失败 → 仅记录 warning 继续（relay Start() 有
+            // "mock 未运行拒绝启动" 前置，宁可失败不可打真实上游，§5.5）；托盘/配额轮询同被打到
+            // mock 地址（失败即显示错误，不会静默落回真实上游）。
+            try
+            {
+                var mock = new MockUpstreamServer(cfg.DevMock);
+                mock.Start(cfg.Relay?.Port ?? DevMode.DefaultRelayPort, cfg.Warnings);
+            }
+            catch (Exception ex)
+            {
+                cfg.Warnings.Add($"[dev] mock upstream 启动失败（端口 {DevMode.MockUpstreamPort}）：{ex.Message}");
+            }
+        }
         try
         {
-            using var showEvt = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
+            using var showEvt = new EventWaitHandle(false, EventResetMode.AutoReset, DevMode.ShowEventName);
             var ctx = new AppContext(cfg);
             var watcher = new Thread(() =>
             {
@@ -88,7 +131,7 @@ static class Program
     {
         try
         {
-            SetCurrentProcessExplicitAppUserModelID(AppUserModelId);
+            SetCurrentProcessExplicitAppUserModelID(DevMode.Aumid);
         }
         catch
         {
@@ -114,7 +157,9 @@ static class Program
             return 1;
         }
         var cfgPath = Path.Combine(dir, "glmbalance-taskbar.json");
-        var cfg = AppConfig.Load(); // 仅取全局 apiKey 读取链；relay 段按目标文件独立解析
+        // 仅取全局 apiKey 读取链；relay 段按目标文件独立解析。dev 下传 ConfigRoot：
+        // 避免读 exe 同目录生产配置，避免真实全局 key 成为 ResolveKey 回退来源（R1-F5）
+        var cfg = AppConfig.Load(DevMode.IsDev ? DevMode.ConfigRoot : null);
         var warnings = new List<string>();
 
         RelayOptions? targetOpts = null;
@@ -133,6 +178,13 @@ static class Program
         }
 
         var opts = targetOpts ?? RelayOptions.CreateDefault();
+        // dev 后处理（R1-F7/N3）：CreateDefault/SeedDefaults 产物与目标目录既有配置两种分支
+        // 统一规格化为 dev 语义（port=8788、baseURL→mock、假 key），产物不含真实上游 URL；
+        // SeedDefaults 本体不改（生产语义）。此后再走既有 InitHeadless（含 re-enable 分支）。
+        if (DevMode.IsDev)
+        {
+            DevMode.ApplyDevRelayInitSemantics(opts, warnings);
+        }
         var mgr = new RelayManager(cfg, opts, configPath: cfgPath, initialized: targetOpts != null);
         var ok = mgr.InitHeadless(warnings);
         foreach (var w in warnings)
@@ -156,12 +208,18 @@ static class Program
         return 0;
     }
 
-    /// <summary>控制台模式：抓取一次并打印解析结果（对齐 scripts/e2e-check.ts 的输出）。</summary>
+    /// <summary>控制台模式：抓取一次并打印解析结果（对齐 scripts/e2e-check.ts 的输出）。
+    /// dev（R1-F4）：不构造 GlmApiClient、不打任何网络——用量/活跃度用内置 mock 快照，纯离线评估。</summary>
     static int RunOnce()
     {
         AttachParentConsole();
 
-        var cfg = AppConfig.Load();
+        var cfg = AppConfig.Load(DevMode.IsDev ? DevMode.ConfigRoot : null);
+        if (DevMode.IsDev)
+        {
+            DevMode.ApplyMockOverrides(cfg);
+            DevMode.ApplyDevRelayDefaults(cfg);
+        }
         Console.WriteLine($"config: base={cfg.MonitorBase} org={Mask(cfg.Organization)} project={Mask(cfg.Project)} type={CfgStr(cfg.UsageType?.ToString())} interval={cfg.IntervalSeconds}s activity={cfg.Activity}");
         foreach (var w in cfg.Warnings) Console.WriteLine($"warn: {w}");
 
@@ -183,8 +241,19 @@ static class Program
             Console.WriteLine("relay: 未配置（中转关闭，原功能不受影响）");
         }
 
-        using var client = new GlmApiClient(cfg);
-        var snap = client.FetchUsageAsync().GetAwaiter().GetResult();
+        UsageSnapshot snap;
+        ActivityInfo? devActivity = null;
+        if (DevMode.IsDev)
+        {
+            // --dev --once：内置 mock 快照（不打网络，验收 9）
+            snap = DevMode.MockSnapshot(cfg);
+            devActivity = cfg.Activity ? DevMode.MockActivity() : null;
+        }
+        else
+        {
+            using var client = new GlmApiClient(cfg);
+            snap = client.FetchUsageAsync().GetAwaiter().GetResult();
+        }
         if (snap.Error != null)
         {
             Console.WriteLine($"error: {snap.Error}");
@@ -215,17 +284,32 @@ static class Program
 
         if (cfg.Activity)
         {
-            var act = client.FetchActivityAsync().GetAwaiter().GetResult();
-            if (act != null)
+            if (DevMode.IsDev)
             {
-                var total = act.TotalTokens is long tt ? ActivityParser.FmtTokens(tt) : "?";
-                var today = act.TodayTokens is long td ? ActivityParser.FmtTokens(td) : "?";
-                var streak = act.CurrentStreakDays?.ToString() ?? "?";
-                Console.WriteLine($"activity: 累计 {total} · {act.DurationLabel ?? "-"} | 今日 {today} | 连续 {streak} 天 | 近14天 {act.Spark ?? "-"}");
+                var act = devActivity;
+                if (act != null)
+                {
+                    var total = act.TotalTokens is long tt ? ActivityParser.FmtTokens(tt) : "?";
+                    var today = act.TodayTokens is long td ? ActivityParser.FmtTokens(td) : "?";
+                    var streak = act.CurrentStreakDays?.ToString() ?? "?";
+                    Console.WriteLine($"activity: [mock] 累计 {total} · {act.DurationLabel ?? "-"} | 今日 {today} | 连续 {streak} 天 | 近14天 {act.Spark ?? "-"}");
+                }
             }
             else
             {
-                Console.WriteLine("activity: 获取失败");
+                using var client = new GlmApiClient(cfg);
+                var act = client.FetchActivityAsync().GetAwaiter().GetResult();
+                if (act != null)
+                {
+                    var total = act.TotalTokens is long tt ? ActivityParser.FmtTokens(tt) : "?";
+                    var today = act.TodayTokens is long td ? ActivityParser.FmtTokens(td) : "?";
+                    var streak = act.CurrentStreakDays?.ToString() ?? "?";
+                    Console.WriteLine($"activity: 累计 {total} · {act.DurationLabel ?? "-"} | 今日 {today} | 连续 {streak} 天 | 近14天 {act.Spark ?? "-"}");
+                }
+                else
+                {
+                    Console.WriteLine("activity: 获取失败");
+                }
             }
         }
         Console.WriteLine("OK");

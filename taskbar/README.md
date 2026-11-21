@@ -227,6 +227,53 @@ opencode (localrelay provider) ──http://127.0.0.1:8787/v1──▶ GlmBalanc
 - 配置写回只有一条路径（JsonNode 合并写回 `glmbalance-taskbar.json`，保留文件其他字段）。
 - 中转仅监听本机回环；日志与错误汇总不含请求体内容。
 
+## 开发实例（--dev）
+
+带 `--dev` 参数启动即进入**开发实例**：与生产实例并存、互不干扰，上游全部 mock，适合本地测试失败转移/降级/部署流程。
+
+| 维度 | 生产（不带参数） | 开发（`--dev`） |
+| --- | --- | --- |
+| 配置目录 | exe 同目录 `glmbalance-taskbar.json` | `%LOCALAPPDATA%\GlmBalanceTaskbar-dev\glmbalance-taskbar.json` |
+| relay 端口 | 8787（默认） | **8788**（默认；显式写 8787 会被拒绝启动） |
+| mock 上游 | —（真实上游） | 进程内 `http://127.0.0.1:8789`（所有渠道 baseURL 与 monitorBase 建池时强制覆写指向它，配置文件保留原值） |
+| 单实例标识 | `Local\GlmBalanceTaskbar.SingleInstance` 等 | 加 `.Dev` 后缀（互斥体/窗口事件/AUMID 各自独立，双实例任务栏身份分离） |
+| 窗口标题 | `GLM 周 52%` | `[DEV] GLM 周 52%` |
+| `/status` | 不含 `dev` 字段 | 携带 `"dev": true` |
+| 部署 | 可落盘（自动备份） | **dry-run**：只预览、绝不写盘 |
+
+用法示例：
+
+```sh
+# 启动开发实例（托盘出现 [DEV] 图标，与生产实例并存）
+GlmBalanceTaskbar.exe --dev
+
+# 离线评估（不打网络：内置 mock 快照，无监听无写盘）
+GlmBalanceTaskbar.exe --dev --once
+
+# 对指定目录生成 dev 语义配置（port=8788、渠道播种 mock baseURL + 假 key mock-<id>）
+GlmBalanceTaskbar.exe --dev --relay-init <dir>
+
+# 图标诊断（与 mock/配置无关，行为同现状）
+GlmBalanceTaskbar.exe --dev --dump-icon
+```
+
+dev 配置文件可在生产格式基础上增加顶层 `devMock` 段编程假上游行为（生产实例解析时忽略该键）：
+
+```jsonc
+{
+  "relay": { "enabled": true, "port": 8788, "providers": [ /* baseURL 填真实地址即可，运行时自动覆写为 mock */ ] },
+  "devMock": {
+    "upstreamPort": 8789,
+    "chatContent": "[mock] dev 假响应",
+    "latencyMs": 50,
+    "quota": { "fiveHourRemainingPct": 80, "weekRemainingPct": 60 },   // weekRemainingPct < 5 可观察 degraded，改回 > 10 观察 restore
+    "providers": { "zhipu-coding": { "chatStatus": 200, "modelsStatus": 200 } }  // 429/500/streamBreak 可观察失败转移
+  }
+}
+```
+
+> 注意：dev 配置为**严格 JSON**；`devMock` 段省略时全部取默认。mock 上游 8789 被占用时 dev relay 拒绝启动（宁可失败不可打真实上游）。设计与验收详见 `docs/plans/dev-prod-separation.md`。
+
 ## 隐私
 
 与插件一致：直接从本机请求智谱官方 API，apiKey 仅用于向智谱 API 鉴权，不经过任何第三方。

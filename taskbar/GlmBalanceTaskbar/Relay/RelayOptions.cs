@@ -63,6 +63,10 @@ public sealed class RelayOptions
     /// <summary>解析时因 providers 缺失/为空而播种了默认渠道（需写回）。</summary>
     public bool Seeded { get; set; }
 
+    /// <summary>relay.port 是否来自显式配置（false = 默认值 8787）。
+    /// dev 合成用它区分「未配置 → 默认改 8788」与「显式写 8787 → 保留，由 Start() 硬禁拦截」。</summary>
+    public bool PortExplicit { get; set; }
+
     public string BaseUrl => $"http://127.0.0.1:{Port}/v1";
     public string AdminUrl => $"http://127.0.0.1:{Port}/admin";
 
@@ -93,6 +97,7 @@ public sealed class RelayOptions
         {
             o.Enabled = relay.Prop("enabled").BoolVal() ?? true;
             o.Port = (int?)relay.Prop("port").Num() ?? 8787;
+            o.PortExplicit = relay.Prop("port").Num() != null;
             o.LocalToken = relay.Prop("localToken").Str() ?? "";
             o.ProbeIntervalSeconds = (int?)relay.Prop("probeIntervalSeconds").Num() ?? 60;
             o.DegradeBelowPct = (int?)relay.Prop("degradeBelowPct").Num() ?? 5;

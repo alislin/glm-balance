@@ -48,6 +48,14 @@ public sealed class RelayManager : IDisposable
         };
     }
 
+    /// <summary>dev 统一配置根：--dev 时配置文件派生自 %LOCALAPPDATA%\GlmBalanceTaskbar-dev\，否则 exe 同目录（现状）。</summary>
+    internal static string DefaultConfigPath() =>
+        DevMode.IsDev
+            ? DevMode.ConfigPath
+            : Path.Combine(
+                Path.GetDirectoryName(Environment.ProcessPath ?? Environment.GetCommandLineArgs()[0]) ?? ".",
+                "glmbalance-taskbar.json");
+
     public RelayOptions Options => _opts;
     public ChannelRouter Router => _router;
     public bool Running { get; private set; }
@@ -75,18 +83,41 @@ public sealed class RelayManager : IDisposable
         return (isZhipuHost || isZhipuProbe) ? NonEmpty(_cfg.ApiKey) : null;
     }
 
-    /// <summary>构建渠道池：解析实际 key（含回退规则），并注入归位重解析委托。</summary>
+    /// <summary>
+    /// 构建渠道池：解析实际 key（含回退规则），并注入归位重解析委托。
+    /// dev（R1-F1 最终防线 + N2 克隆后覆写）：对每个 ProviderConfig 克隆一份再 ApplyPoolOverride——
+    /// 池持克隆引用（出站必为 mock），_opts.Providers 保持用户原值（全节点写回忠实往返）；
+    /// 生产（无 --dev）此分支短路，行为与现状逐字节一致。
+    /// </summary>
     List<ProviderRuntime> BuildPool()
     {
         var pool = new List<ProviderRuntime>();
         foreach (var p in _opts.Providers)
         {
-            var rt = new ProviderRuntime(p, _opts, ResolveKey);
-            rt.SetResolvedKey(ResolveKey(p));
+            var cfgForPool = p;
+            if (DevMode.IsDev)
+            {
+                cfgForPool = CloneConfig(p);
+                DevMode.ApplyPoolOverride(cfgForPool);
+            }
+            var rt = new ProviderRuntime(cfgForPool, _opts, ResolveKey);
+            rt.SetResolvedKey(ResolveKey(cfgForPool));
             pool.Add(rt);
         }
         return pool;
     }
+
+    static ProviderConfig CloneConfig(ProviderConfig p) => new()
+    {
+        Id = p.Id,
+        Name = p.Name,
+        Priority = p.Priority,
+        Probe = p.Probe,
+        BaseUrl = p.BaseUrl,
+        ApiKey = p.ApiKey,
+        Models = p.Models.ToList(),
+        Enabled = p.Enabled,
+    };
 
     static string? NonEmpty(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 
@@ -95,6 +126,27 @@ public sealed class RelayManager : IDisposable
     {
         if (Running) return true;
         if (!_opts.Enabled) return false;
+
+        // dev 硬防护（G2）：任何时刻禁止 dev 实例占用生产端口 8787（含面板改 port 后重启/重新启用的路径）
+        if (DevMode.IsDev && _opts.Port == DevMode.ProductionRelayPort)
+        {
+            warnings.Add("dev 实例禁止占用生产端口 8787：请修改 relay.port 后重启");
+            return false;
+        }
+
+        // 0) dev 前置：mock upstream 必须已在运行（宁可失败不可打真实上游，§5.5）
+        if (DevMode.IsDev && !DevMode.MockUpstreamRunning)
+        {
+            warnings.Add("dev mock upstream 未运行：拒绝启动 relay（不允许真实上游出站）");
+            return false;
+        }
+
+        // 0.5) dev 覆写 warning 并入本次启动 warnings（ApplyMockOverrides 已在 Main 并入 cfg.Warnings，
+        // 这里收建池前的 DevMode 静态累积；建池后的在下方针再度并入）
+        if (DevMode.IsDev)
+        {
+            warnings.AddRange(DevMode.DrainWarnings());
+        }
 
         // 1) 首启生成随机 token（32 字节 hex）写回；失败 → 警告并免鉴权运行
         if (string.IsNullOrWhiteSpace(_opts.LocalToken))
@@ -122,6 +174,11 @@ public sealed class RelayManager : IDisposable
 
         // 3) 建池 + 启动监听
         _router.ReplacePool(BuildPool());
+        if (DevMode.IsDev)
+        {
+            // 建池覆写 warning（DevMode 静态累积，按渠道 id 去重）并入启动 warnings
+            warnings.AddRange(DevMode.DrainWarnings());
+        }
         _server = new RelayServer(this);
         if (!_server.Start(_opts.Port, warnings))
         {
@@ -339,7 +396,8 @@ public sealed class RelayManager : IDisposable
             _startedAt is { } st ? (now - st).TotalSeconds : 0,
             req, fail,
             _authDisabled, false,
-            providers, _router.ModelUnion());
+            providers, _router.ModelUnion(),
+            Dev: DevMode.IsDev);
     }
 
     static bool Resolved(ProviderRuntime rt) => rt.ResolvedKey != null;
@@ -514,12 +572,23 @@ public sealed class RelayManager : IDisposable
         new PiConfigSource(_opts.PiConfigPath),
     };
 
-    /// <summary>部署器列表（opencode 完整实现；pi 占位）。</summary>
-    public List<IAgentDeployer> CreateDeployers() => new()
+    /// <summary>
+    /// 部署器列表（opencode 完整实现；pi 占位）。
+    /// dev 下包 DryRun 装饰器（G5）：部署只预览、绝不落盘；AdminApi 零改动获得 dry-run 语义。
+    /// </summary>
+    public List<IAgentDeployer> CreateDeployers()
     {
-        new OpenCodeDeployer(),
-        new PiDeployer(),
-    };
+        var list = new List<IAgentDeployer>
+        {
+            new OpenCodeDeployer(),
+            new PiDeployer(),
+        };
+        if (DevMode.IsDev)
+        {
+            list = list.Select(d => new DryRunDeployer(d)).ToList<IAgentDeployer>();
+        }
+        return list;
+    }
 
     /// <summary>测试连接：GET {baseURL}/models（10s 超时；共享静态 client，F7）。</summary>
     static readonly HttpClient TestClient = new() { Timeout = TimeSpan.FromSeconds(10) };
@@ -549,12 +618,20 @@ public sealed class RelayManager : IDisposable
 
     // ─────────────────────────── --once 离线评估 ───────────────────────────
 
-    /// <summary>--once 模式：不监听端口不写文件，仅评估当前配置下的渠道状态（复用已抓快照做探测缓存）。</summary>
+    /// <summary>
+    /// --once 模式：不监听端口不写文件，仅评估当前配置下的渠道状态（复用已抓快照做探测缓存）。
+    /// dev（R1-F4）：传入的 snapshot 已是 DevMode.MockSnapshot 内置快照（RunOnce 不构造 GlmApiClient），
+    /// 全链离线；建池覆写 warning 并入返回行。
+    /// </summary>
     public static List<string> EvaluateOnce(AppConfig cfg, RelayOptions opts, UsageSnapshot snapshot)
     {
         var lines = new List<string>();
         var mgr = new RelayManager(cfg, opts, configPath: "") { _offline = true, _lastSnap = snapshot };
         var pool = mgr.BuildPool();
+        if (DevMode.IsDev)
+        {
+            lines.AddRange(DevMode.DrainWarnings());
+        }
         foreach (var rt in pool)
         {
             if (!opts.Enabled)

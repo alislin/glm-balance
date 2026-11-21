@@ -32,6 +32,8 @@ sealed class AppContext : ApplicationContext
         _client = new GlmApiClient(cfg);
         _form = new DetailForm();
         MainForm = _form;
+        // dev 双实例消歧：窗口标题（托盘 tooltip）加 [DEV] 前缀（AUMID 已分离，任务栏独立身份）
+        if (DevMode.IsDev) _form.Text = "[DEV] " + _form.Text;
         _form.RefreshRequested += (_, _) => _ = RefreshAsync(force: true);
         _form.PanelRequested += (_, _) => OpenAdminPanel();
         _form.RelayToggleRequested += (_, _) => _ = ToggleRelayAsync();
@@ -68,7 +70,7 @@ sealed class AppContext : ApplicationContext
         _tray.MouseMove += (_, _) => ShowTrayPreview();
 
         // 初始占位：加载中
-        _form.Text = "GLM 用量 · 加载中…";
+        _form.Text = DevMode.IsDev ? "[DEV] GLM 用量 · 加载中…" : "GLM 用量 · 加载中…";
         SetIcon(IconRenderer.RenderTextIcon("…", Color.Gray));
 
         // 最小化显示：任务栏按钮出现且不弹窗
@@ -169,14 +171,14 @@ sealed class AppContext : ApplicationContext
 
             if (s.Error != null)
             {
-                _form.Text = $"GLM: {s.Error}";
+                _form.Text = $"{(DevMode.IsDev ? "[DEV] " : "")}GLM: {s.Error}";
                 SetIcon(IconRenderer.RenderTextIcon("?", Color.Gray));
                 TaskbarProgress.Clear(_form.Handle);
             }
             else if ((s.Week ?? s.FiveHour ?? s.Mcp) is { Remaining: int r } main)
             {
                 var tag = s.Week != null ? "周" : s.FiveHour != null ? "5h" : "MCP";
-                var title = $"GLM {tag} {r}%";
+                var title = $"{(DevMode.IsDev ? "[DEV] " : "")}GLM {tag} {r}%";
                 if (main.Detail != null) title += $" · {main.DetailLabel ?? "已用"} {main.Detail}";
                 if (main.ResetLabel != null) title += $" · ↻ {main.ResetLabel}";
                 _form.Text = title;
@@ -186,7 +188,7 @@ sealed class AppContext : ApplicationContext
             }
             else
             {
-                _form.Text = "GLM 用量 · 暂无配额数据";
+                _form.Text = $"{(DevMode.IsDev ? "[DEV] " : "")}GLM 用量 · 暂无配额数据";
                 SetIcon(IconRenderer.RenderTextIcon("–", Color.Gray));
                 TaskbarProgress.Clear(_form.Handle);
             }
