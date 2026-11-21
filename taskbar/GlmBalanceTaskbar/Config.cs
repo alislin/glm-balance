@@ -17,10 +17,7 @@ public sealed class AppConfig
     /// <summary>中转配置段；null = "relay" 缺省或解析失败（中转关闭，原功能零影响）。</summary>
     public RelayOptions? Relay { get; set; }
 
-    /// <summary>
-    /// devMock 配置段（仅 --dev 语义使用；生产 Load 不读该键，JSON 未知键自动忽略，生产零影响）。
-    /// 生产配置文件里即便写了 devMock 也只是被忽略的未知键。
-    /// </summary>
+    /// <summary>devMock 配置段（仅 --dev 语义使用；生产 Load 不读该键，JSON 未知键自动忽略，生产零影响）。</summary>
     public DevMockOptions? DevMock { get; set; }
 
     public List<string> Warnings { get; } = new();
@@ -67,15 +64,15 @@ public sealed class AppConfig
                 // relay 段：整体缺省 → null（中转关闭）；解析失败 → warnings + 中转关闭
                 cfg.Relay = RelayOptions.Parse(r, cfg.Warnings);
 
-                // devMock 段（仅 dev 语义；生产配置即便写了也被忽略，不影响生产行为）
+                // devMock 段（m4：默认值以 DevMockOptions 类默认为单一来源，解析只覆盖显式项）
                 if (r.Prop("devMock") is { ValueKind: JsonValueKind.Object } dm)
                 {
                     var mo = new DevMockOptions();
-                    mo.UpstreamPort = (int?)dm.Prop("upstreamPort").Num() ?? DevMode.DefaultMockUpstreamPort;
-                    mo.ChatContent = dm.Prop("chatContent").Str() ?? mo.ChatContent;
-                    mo.LatencyMs = (int?)dm.Prop("latencyMs").Num() ?? 50;
-                    mo.FiveHourRemainingPct = (int?)dm.Prop("quota").Prop("fiveHourRemainingPct").Num() is { } q5 ? Math.Clamp(q5, 0, 100) : 80;
-                    mo.WeekRemainingPct = (int?)dm.Prop("quota").Prop("weekRemainingPct").Num() is { } qw ? Math.Clamp(qw, 0, 100) : 60;
+                    if ((int?)dm.Prop("upstreamPort").Num() is { } up) mo.UpstreamPort = up;
+                    if (dm.Prop("chatContent").Str() is { } cc) mo.ChatContent = cc;
+                    if ((int?)dm.Prop("latencyMs").Num() is { } lm) mo.LatencyMs = lm;
+                    if ((int?)dm.Prop("quota").Prop("fiveHourRemainingPct").Num() is { } q5) mo.FiveHourRemainingPct = Math.Clamp(q5, 0, 100);
+                    if ((int?)dm.Prop("quota").Prop("weekRemainingPct").Num() is { } qw) mo.WeekRemainingPct = Math.Clamp(qw, 0, 100);
                     if (dm.Prop("providers") is { ValueKind: JsonValueKind.Object } ps)
                     {
                         foreach (var e in ps.EnumerateObject())

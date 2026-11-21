@@ -42,6 +42,12 @@ sealed class AppContext : ApplicationContext
         // 仅 enabled=true 时启动；启动失败只记 warnings，配额显示不受影响。
         // 未初始化（无 relay 段）用内存默认占位，等待用户点击「启用中转」才写回配置。
         var relayOpts = cfg.Relay ?? RelayOptions.CreateDefault();
+        // M1：dev 下缺省（cfg.Relay == null 的从零启用路径）端口合成——CreateDefault 产物
+        // PortExplicit=false 且 Port=8787，命中 8787→8788；否则从零启用必被 Start() 硬禁卡死。
+        if (DevMode.IsDev)
+        {
+            DevMode.ApplyDevRelayDefaults(relayOpts, cfg.Warnings);
+        }
         var relay = new RelayManager(cfg, relayOpts, initialized: cfg.Relay != null);
         if (cfg.Relay is { Enabled: true })
         {

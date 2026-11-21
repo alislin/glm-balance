@@ -81,18 +81,17 @@ static class Program
         var cfg = AppConfig.Load(DevMode.IsDev ? DevMode.ConfigRoot : null);
         if (DevMode.IsDev)
         {
-            // dev 配置合成（第 1 层覆写，便利层）：mock 端口合成 → relay 默认端口 → mock 覆写
-            DevMode.ApplyDevRelayDefaults(cfg);
+            // dev 配置合成（m6 统一单一入口）：mock 端口合成 → relay 默认端口 → monitorBase 覆写 → 预告
             DevMode.ApplyMockOverrides(cfg);
             cfg.Warnings.AddRange(DevMode.DrainWarnings());
 
-            // 启动进程内 mock upstream（8789）。失败 → 仅记录 warning 继续（relay Start() 有
-            // "mock 未运行拒绝启动" 前置，宁可失败不可打真实上游，§5.5）；托盘/配额轮询同被打到
-            // mock 地址（失败即显示错误，不会静默落回真实上游）。
+            // m3：进程内 mock upstream（8789）生命周期显式化——保存静态引用，Main 退出时 Dispose。
+            // 失败 → 仅记录 warning 继续（relay Start() 有 "mock 未运行拒绝启动" 前置，
+            // 宁可失败不可打真实上游，§5.5）；托盘/配额轮询同被打到 mock 地址（失败即显示错误）。
             try
             {
-                var mock = new MockUpstreamServer(cfg.DevMock);
-                mock.Start(cfg.Relay?.Port ?? DevMode.DefaultRelayPort, cfg.Warnings);
+                DevMockServer = new MockUpstreamServer(cfg.DevMock);
+                DevMockServer.Start(cfg.Relay?.Port ?? DevMode.DefaultRelayPort, cfg.Warnings);
             }
             catch (Exception ex)
             {
@@ -121,6 +120,10 @@ static class Program
         {
             try { File.WriteAllText(Path.Combine(Path.GetTempPath(), "glmbalance-tray-crash.log"), ex.ToString()); } catch { /* ignore */ }
             throw;
+        }
+        finally
+        {
+            DevMockServer?.Dispose(); // m3：显式释放 mock upstream（AppContext.Dispose 已先停 relay）
         }
         GC.KeepAlive(mutex);
         return 0;
@@ -156,9 +159,27 @@ static class Program
             Console.WriteLine($"error: 创建目录失败 {dir}: {ex.Message}");
             return 1;
         }
+
+        // M3 生产目录守卫（宁严勿松，无 --force 逃生舱）：--dev --relay-init 误指生产配置目录
+        // 或目标目录含生产配置文件时直接拒绝——避免无备份覆写生产配置。
+        if (DevMode.IsDev)
+        {
+            var prodDir = Path.GetDirectoryName(Environment.ProcessPath ?? Environment.GetCommandLineArgs()[0]) ?? ".";
+            var target = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var prodFull = Path.GetFullPath(prodDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (string.Equals(target, prodFull, StringComparison.OrdinalIgnoreCase) ||
+                (File.Exists(Path.Combine(target, "glmbalance-taskbar.json")) && IsUnder(target, prodFull)))
+            {
+                Console.WriteLine("error: --dev --relay-init 禁止指向生产配置目录（exe 同目录）或其中含生产配置文件的目录；请改用 %LOCALAPPDATA%\\GlmBalanceTaskbar-dev");
+                return 1;
+            }
+        }
+
         var cfgPath = Path.Combine(dir, "glmbalance-taskbar.json");
         // 仅取全局 apiKey 读取链；relay 段按目标文件独立解析。dev 下传 ConfigRoot：
-        // 避免读 exe 同目录生产配置，避免真实全局 key 成为 ResolveKey 回退来源（R1-F5）
+        // 避免读 exe 同目录生产配置，避免真实全局 key 成为 ResolveKey 回退来源（R1-F5）。
+        // m1（注释与实现一致）：dev 下该读取链仍可命中真实全局 key（auth.json 回退链只读），
+        // key 仅可能作为 Authorization 头发往 127.0.0.1 mock（无外泄面），不断链。
         var cfg = AppConfig.Load(DevMode.IsDev ? DevMode.ConfigRoot : null);
         var warnings = new List<string>();
 
@@ -217,8 +238,8 @@ static class Program
         var cfg = AppConfig.Load(DevMode.IsDev ? DevMode.ConfigRoot : null);
         if (DevMode.IsDev)
         {
+            // m6：与 Main 一致——单一入口 ApplyMockOverrides（内部端口合成最先）
             DevMode.ApplyMockOverrides(cfg);
-            DevMode.ApplyDevRelayDefaults(cfg);
         }
         Console.WriteLine($"config: base={cfg.MonitorBase} org={Mask(cfg.Organization)} project={Mask(cfg.Project)} type={CfgStr(cfg.UsageType?.ToString())} interval={cfg.IntervalSeconds}s activity={cfg.Activity}");
         foreach (var w in cfg.Warnings) Console.WriteLine($"warn: {w}");
@@ -315,6 +336,21 @@ static class Program
         Console.WriteLine("OK");
         return 0;
     }
+
+    /// <summary>M3 辅助：target 是否位于 under 目录之内（含相等，路径规范化后按分隔符边界比较）。</summary>
+    static bool IsUnder(string target, string under)
+    {
+        var t = target.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var u = under.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (u.Length == 0) return false;
+        return t.Equals(u, StringComparison.OrdinalIgnoreCase) ||
+               t.Length > u.Length &&
+               (t[u.Length] == Path.DirectorySeparatorChar || t[u.Length] == Path.AltDirectorySeparatorChar) &&
+               t.StartsWith(u, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>m3：dev mock upstream 生命周期（进程内单实例；Main/RunOnce 结束时 Dispose）。</summary>
+    static MockUpstreamServer? DevMockServer;
 
     /// <summary>诊断：渲染实验矩阵 + "36" 各尺寸帧写到 %TEMP%。</summary>
     static int RunDumpIcon()

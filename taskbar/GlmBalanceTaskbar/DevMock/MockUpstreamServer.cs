@@ -60,7 +60,7 @@ public sealed class MockUpstreamServer : IDisposable
         _cts = new CancellationTokenSource();
         _ = Task.Run(() => AcceptLoopAsync(listener, _cts.Token));
         DevMode.SetMockUpstreamRunning(true);
-        warnings.Add($"[dev] mock upstream 已启动：{DevMode.MockBaseUrl}（chat={_rules.ChatContent.Length} 字符、latency={_rules.LatencyMs}ms）");
+        warnings.Add($"[dev] mock upstream 已启动：{DevMode.MockMonitorBase}（chat={_rules.ChatContent.Length} 字符、latency={_rules.LatencyMs}ms）");
     }
 
     public void Dispose()
@@ -277,7 +277,12 @@ public sealed class MockUpstreamServer : IDisposable
 
             if (rules?.StreamBreak == true)
             {
-                // 中途断开 TCP（不写 [DONE]、不 Close）→ 客户端侧触发 NoteStreamBroken
+                // M4 观测点（与 RelayServer 实现一致，不改 RelayServer）：
+                // 客户端收到截断流（无 [DONE]，连接中断）——验证客户端侧的截断容错；
+                // 渠道侧无惩罚：RelayServer 仅在 SSE idle ≥120s 超时路径调 NoteStreamBroken，
+                // 上游直接断开走 WriteUpstreamResponseAsync 的 catch 分支"写回中断"，只记日志不计数。
+                // 备选演练法（慢）：streamBreak 改为发 2 chunk 后挂起 ≥120s 不关流，可走 idle
+                // 超时真实触发 NoteStreamBroken（errorStreak +1 → 连续 3 次进冷却）。
                 rsp.Abort();
                 return;
             }

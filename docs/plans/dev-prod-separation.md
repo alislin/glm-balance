@@ -118,7 +118,7 @@ IUsageProbe 等生产类型均不需要为 mock 改造。
 
 | 文件 | 改动要点 |
 |---|---|
-| **新增 `DevMode.cs`** | dev 模式单一真源：`IsDev`（解析 args，`OrdinalIgnoreCase`，与既有 `--once` 等参数同风格）；`ConfigRoot`（`%LOCALAPPDATA%\GlmBalanceTaskbar-dev\`）；`ConfigPath`；`MutexName` / `ShowEventName` / `Aumid` 派生（生产值原样）；`DefaultRelayPort = 8788`；`MockBaseUrl`（`http://127.0.0.1:<upstreamPort>`，供建池覆写判定与覆写目标，R1-F1）；`IsMockBaseUrl(string url)` 判定函数；`ApplyMockOverrides(AppConfig)`（启动配置合成阶段，见 §4.1 第 1 层）；`ApplyPoolOverride(ProviderConfig)`（建池时单渠道覆写，供 BuildPool 调用，见 §4.1 第 2 层）；`MockSnapshot(AppConfig)`（`--dev --once` 用内置快照）；`ApplyDevRelayInitSemantics(RelayOptions)`（`--dev --relay-init` 的 dev 后处理：port=8788、播种渠道 baseURL→mock、假 key，R1-F7） |
+| **新增 `DevMode.cs`** | dev 模式单一真源：`IsDev`（解析 args，`OrdinalIgnoreCase`，与既有 `--once` 等参数同风格）；`ConfigRoot`（`%LOCALAPPDATA%\GlmBalanceTaskbar-dev\`）；`ConfigPath`；`MutexName` / `ShowEventName` / `Aumid` 派生（生产值原样）；`DefaultRelayPort = 8788`；`MockBaseUrl`（**B1 修正：`http://127.0.0.1:<upstreamPort>/v1`**——生产拼接约定是 BaseUrl 直拼资源路径 /chat/completions、/models，/v1 属于 baseURL 而非资源路径；供建池覆写判定与覆写目标，R1-F1；`IsMockBaseUrl` 按端口判定不受路径影响）；`MockMonitorBase`（不带 /v1，供 GlmApiClient/探测侧 MonitorBase 覆写）；`IsMockBaseUrl(string url)` 判定函数；`ApplyMockOverrides(AppConfig)`（启动配置合成单一入口，含端口合成，见 §4.1 第 1 层）；`ApplyPoolOverride(ProviderConfig)`（建池时单渠道覆写，供 BuildPool 调用，见 §4.1 第 2 层）；`MockSnapshot(AppConfig)`（`--dev --once` 用内置快照）；`ApplyDevRelayInitSemantics(RelayOptions)`（`--dev --relay-init` 的 dev 后处理：端口遵循 PortExplicit（m2）、播种渠道 baseURL→mock、假 key，R1-F7） |
 | `Program.cs` | ① `Main` 早期解析 `--dev`（在 `--once` / `--dump-icon` / `--relay-init` 判定**之前**，使组合语义生效）；② `MutexName`/`ShowEventName` 常量改为 `DevMode` 派生属性；③ `AppUserModelId` → `DevMode.Aumid`；④ `AppConfig.Load()` 调用点按模式传配置目录——**三处逐一点名**：`Main` L58（主路径）、`RunOnce` L164、`RunRelayInit` L117（仅取全局 apiKey 读取链；dev 下传 ConfigRoot，避免读 exe 同目录生产配置、避免真实全局 key 成为 ResolveKey 回退来源，R1-F5）；⑤ **`RunOnce` mock 改造（R1-F4）**：dev 下不构造 `GlmApiClient`，`FetchUsageAsync()`（L187）与 `FetchActivityAsync()`（L218）结果替换为 `DevMode.MockSnapshot(cfg)`（activity 部分为内置静态数据），保证组合语义表"不打网络"有实现落点；⑥ 启动 dev mock upstream（`--dev` 且非 `--once`/`--relay-init` 时）；⑦ **`RunRelayInit` dev 后处理（R1-F7）**：`--dev --relay-init` 下，在 `RelayOptions.CreateDefault()` / `SeedDefaults()` 之后、`InitHeadless` 落盘之前调用 `DevMode.ApplyDevRelayInitSemantics(opts)`（否则默认产物是 port=8787 + 真实 baseURL 播种 zhipu-coding/custom-relay，配置文件本身就含真实上游 URL） |
 | `Config.cs` | ① `Load(string? configDir = null)`：优先级第 1 层（exe 同目录）替换为传入目录，**其余回退链（auth.json → opencode.json → tui.json）保持不变**（只读，无泄漏风险）；② 新增顶层 `devMock` 段解析为 `DevMockOptions`（生产 `Load` 不读该键，JSON 未知键自动忽略，生产零影响） |
 | `RelayManager.cs` | ① `configPath` 缺省派生改为经统一配置根（dev → ConfigRoot，生产 → 现状 exe 同目录）；② `Start()` 增加 dev 硬防护：`_opts.Port == 8787` → 启动失败 + warning「dev 实例禁止占用生产端口 8787」；③ **建池时强制覆写（R1-F1 核心修复）**：`BuildPool()` 内、dev 模式下对每个 `ProviderConfig.BaseUrl` 执行 `DevMode.ApplyPoolOverride`——非 mock 地址 → **内存覆写**为 `DevMode.MockBaseUrl` + 记 warning；此为最终防线，位于一切入池路径的汇合点（详见 §4.1）；`MonitorBase` 侧：`ProbeContext.Global` 持有的是启动时已覆写 MonitorBase 的 `AppConfig`，且 provider `BaseUrl` 被覆写为 127.0.0.1 后 `ZhipuMonitorProbe.MonitorBase(p)`（L72-82）不再匹配 zhipu 域 → 回退已覆写的 `Global.MonitorBase`，两条探测路径均落 mock；④ `CreateDeployers()` 在 dev 下返回 **DryRun 装饰器**包装（`new DryRunDeployer(new OpenCodeDeployer())` 等）——AdminApi 零改动即获得 dry-run 语义；⑤ `EvaluateOnce` 支持 mock 快照注入（`--dev --once`）；⑥ `Snapshot()`（RelayStatus 组装）填充 `Dev = DevMode.IsDev`（R1-F2） |
@@ -222,7 +222,11 @@ dev 配置文件（`%LOCALAPPDATA%\GlmBalanceTaskbar-dev\glmbalance-taskbar.json
   RelayServer 的 SSE 转发路径。
 - 按规则返回异常：`chatStatus: 429/402/403` → 配额类错误体（触发 `NoteQuotaFailure`
   硬冷却 + 转移）；`500` → `NoteErrorFailure` 计数；`stream-break` → 发 2 个 chunk 后
-  直接断开 TCP（触发 `NoteStreamBroken`）。
+  直接断开 TCP——**M4 修正观测点**：客户端收到截断流（无 `[DONE]`，连接中断），验证客户端
+  侧截断容错；渠道侧无惩罚（`NoteStreamBroken` 仅存在于 RelayServer 的 SSE idle ≥120s
+  超时路径；上游直接断开走"写回中断"分支，只记日志不计数）。备选演练法（慢）：streamBreak
+  改为发 2 chunk 后挂起 ≥120s 不关流，可走 idle 超时真实触发 `NoteStreamBroken`
+  （errorStreak +1，连续 3 次进冷却）。
 
 ### 4.3 探测返回什么
 
@@ -255,8 +259,8 @@ mock 上游模拟智谱监控端点，返回形状与 QuotaParser 期望一致�
    - `quotaSeconds` 冷却到期后渠道A 惰性归位（`RefreshKey` 后仍持假 key，不再循环 401）。
 4. 连续错误路径：`chatStatus: 500` 连打 3 次（ErrorThreshold）→ 渠道A 冷却
    `errorSeconds`，同样可在面板观测。
-5. SSE 中断路径：`stream-break` → 断流后渠道A 错误计数 +1，客户端收到已转发的部分
-   响应/连接中断，不崩溃。
+5. SSE 中断路径：`stream-break` → 客户端收到截断流（无 [DONE]、连接中断，验证客户端侧容错）；
+   渠道侧无惩罚（M4：`NoteStreamBroken` 仅 idle ≥120s 超时路径触发；慢速演练法见 §4.2）。
 6. **运行时入池路径的 mock 覆盖（R1-F1 回归点）**：
    - 面板「导入」：导入 Discovery 从真实 auth.json 发现的渠道（含真实 baseURL/key）
      → `GET /api/providers` 检查新渠道 `baseUrl` 已被覆写为 `http://127.0.0.1:8789`，

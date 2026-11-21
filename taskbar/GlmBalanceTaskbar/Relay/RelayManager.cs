@@ -37,9 +37,9 @@ public sealed class RelayManager : IDisposable
         _cfg = cfg;
         _opts = opts;
         Initialized = initialized;
-        _configPath = configPath ?? Path.Combine(
-            Path.GetDirectoryName(Environment.ProcessPath ?? Environment.GetCommandLineArgs()[0]) ?? ".",
-            "glmbalance-taskbar.json");
+        // B2：configPath 未显式传参时经统一派生（dev → ConfigRoot，生产 → exe 同目录）。
+        // DevMode.IsDev 在 Main 最早已解析，时序安全；dev 实例任何缺省派生都不可能落到生产配置文件。
+        _configPath = configPath ?? DefaultConfigPath();
         _probeCtx = new ProbeContext
         {
             SnapshotProvider = () => _lastSnap,
@@ -137,7 +137,8 @@ public sealed class RelayManager : IDisposable
         // 0) dev 前置：mock upstream 必须已在运行（宁可失败不可打真实上游，§5.5）
         if (DevMode.IsDev && !DevMode.MockUpstreamRunning)
         {
-            warnings.Add("dev mock upstream 未运行：拒绝启动 relay（不允许真实上游出站）");
+            warnings.Add($"dev mock upstream（127.0.0.1:{DevMode.MockUpstreamPort}）未运行：拒绝启动 relay" +
+                         "（不允许真实上游出站）。请先解决启动 warnings 中 mock upstream 的端口占用");
             return false;
         }
 
@@ -242,12 +243,29 @@ public sealed class RelayManager : IDisposable
         {
             if (_opts.Enabled)
             {
+                // M2：dev 下（ApplyDevRelayInitSemantics 已在 RunRelayInit 规格化内存 opts）
+                // 必须全节点写回，使既有目录分支产物同样不含真实上游 URL（声明与实现一致）；
+                // 生产保持现状：跳过，保留既有配置。
+                if (DevMode.IsDev)
+                {
+                    var devOk = Persist(relay => _opts.ToJson(), warnings);
+                    if (devOk) warnings.Add("relay 段已存在且启用：已按 dev 语义规格化并写回（baseURL→mock、假 key、端口语义）");
+                    return devOk;
+                }
                 warnings.Add("relay 段已存在且启用：跳过初始化（保留既有配置）");
                 return true;
             }
             _opts.Enabled = true;
             var reOk = Persist(relay => { relay["enabled"] = true; return relay; }, warnings);
             if (reOk) warnings.Add("中转已置为启用（保留既有 providers/配置，仅 enabled=true）");
+            if (reOk && DevMode.IsDev)
+            {
+                // M2：dev 下既有 providers 是真实 baseURL 时，仅置 enabled 会保留真实上游落盘——
+                // 再做一次全节点重写为已规格化的 dev 语义。
+                var devReOk = Persist(relay => _opts.ToJson(), warnings);
+                if (devReOk) warnings.Add("已按 dev 语义规格化既有 providers 并写回（baseURL→mock、假 key）");
+                return devReOk;
+            }
             return reOk;
         }
         _opts.Enabled = true;

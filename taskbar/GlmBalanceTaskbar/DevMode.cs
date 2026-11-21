@@ -44,7 +44,15 @@ public static class DevMode
     /// 必须在首次建池/启动 mock 之前合成，此后建池覆写与自环校验共用。</summary>
     public static int MockUpstreamPort { get; private set; } = DefaultMockUpstreamPort;
 
-    public static string MockBaseUrl => $"http://127.0.0.1:{MockUpstreamPort}";
+    /// <summary>
+    /// mock 上游 provider baseURL（B1：带 /v1 前缀——生产拼接约定是 BaseUrl 直拼资源路径
+    /// /chat/completions、/models，/v1 属于 baseURL 而非资源路径；缺 /v1 会使 dev 出站全部 404）。
+    /// 供建池覆写目标；`IsMockBaseUrl` 按端口判定，不受路径影响。
+    /// </summary>
+    public static string MockBaseUrl => $"http://127.0.0.1:{MockUpstreamPort}/v1";
+
+    /// <summary>mock 上游监控基址（不带 /v1：GlmApiClient 在 MonitorBase 后直拼 /api/monitor/...）。</summary>
+    public static string MockMonitorBase => $"http://127.0.0.1:{MockUpstreamPort}";
 
     /// <summary>mock 上游是否已在运行（dev 下 relay Start() 的前置条件：宁可失败不可打真实上游）。</summary>
     public static bool MockUpstreamRunning { get; private set; }
@@ -65,7 +73,13 @@ public static class DevMode
 
     public static void SetMockUpstreamRunning(bool running) => MockUpstreamRunning = running;
 
-    /// <summary>mock 上游地址判定（建池覆写与配置覆写共用）：绝对 URI 且 Host 恰为 127.0.0.1、端口恰为 mock 端口。</summary>
+    /// <summary>mock 上游监控基址判定（MonitorBase 无 /v1 后缀，与 MockBaseUrl 分别判定）。</summary>
+    public static bool IsMockMonitorBase(string? url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var u) &&
+        u.Host == "127.0.0.1" &&
+        u.Port == MockUpstreamPort;
+
+    /// <summary>mock 上游 provider baseURL 判定（B1：按端口判定，不受路径影响；/v1 属于 MockBaseUrl 本体）。</summary>
     public static bool IsMockBaseUrl(string? url) =>
         Uri.TryCreate(url, UriKind.Absolute, out var u) &&
         u.Host == "127.0.0.1" &&
@@ -74,20 +88,22 @@ public static class DevMode
     // ── 第 1 层覆写（配置合成阶段，便利层） ──
 
     /// <summary>
-    /// 启动配置合成后的 dev 覆写：mock 端口合成 + 全局 MonitorBase 指向 mock 上游（托盘/GlmApiClient 出口）
-    /// + 渠道覆写预告 warning。注意：不就地改写 providers 的 BaseUrl——出站隔离由第 2 层
+    /// 启动配置合成后的 dev 覆写：mock 端口合成 → relay 默认端口（m6/M1）→ monitorBase 覆写
+    /// → 渠道覆写预告。注意：不就地改写 providers 的 BaseUrl——出站隔离由第 2 层
     /// （BuildPool 克隆后覆写，N2）独立保证，_opts.Providers 保持用户原值（全节点写回忠实往返）。
+    /// m6：Main 与 RunOnce 共用本单一入口，内部顺序统一（端口合成最先，自环校验用同一端口）。
     /// </summary>
     public static void ApplyMockOverrides(AppConfig? cfg)
     {
         if (!IsDev || cfg == null) return;
         if (cfg.DevMock != null) SetMockUpstreamPort(cfg.DevMock.UpstreamPort);
+        ApplyDevRelayDefaults(cfg);
 
-        if (!IsMockBaseUrl(cfg.MonitorBase))
+        if (!IsMockMonitorBase(cfg.MonitorBase))
         {
             var original = cfg.MonitorBase;
-            cfg.MonitorBase = MockBaseUrl;
-            cfg.Warnings.Add($"[dev] monitorBase 已覆写为 mock 上游 {MockBaseUrl}（原值：{original}）");
+            cfg.MonitorBase = MockMonitorBase;
+            cfg.Warnings.Add($"[dev] monitorBase 已覆写为 mock 上游 {MockMonitorBase}（原值：{original}）");
         }
 
         var providers = cfg.Relay?.Providers;
@@ -198,14 +214,16 @@ public static class DevMode
 
     /// <summary>
     /// 对 CreateDefault()/SeedDefaults() 产物或目标目录既有 relay 配置做 dev 语义规格化：
-    /// port=8788；providers 的非 mock baseURL 全部覆写为 mock 上游、空/mock key 播种为
-    /// "mock-&lt;id&gt;" 假 key（既有真实显式 key 保留——它只会发往 127.0.0.1，避免破坏用户存量）。
+    /// providers 的非 mock baseURL 全部覆写为 mock 上游、空/mock key 播种为
+    /// "mock-&lt;id&gt;" 假 key（既有真实显式 key 保留——它只会发往 127.0.0.1，避免破坏用户存量，m1）。
     /// 两种分支的产物均不含真实上游 URL。
+    /// m2：端口遵循 PortExplicit——未显式配置或显式写了生产端口 8787 时置 8788；
+    /// 用户显式写的其它端口（如 9090）尊重不改。
     /// </summary>
     public static void ApplyDevRelayInitSemantics(RelayOptions? opts, List<string>? warnings)
     {
         if (!IsDev || opts == null) return;
-        opts.Port = DefaultRelayPort;
+        if (!opts.PortExplicit || opts.Port == ProductionRelayPort) opts.Port = DefaultRelayPort;
         foreach (var p in opts.Providers)
         {
             if (!IsMockBaseUrl(p.BaseUrl)) p.BaseUrl = MockBaseUrl;
@@ -214,6 +232,7 @@ public static class DevMode
                 p.ApiKey = "mock-" + p.Id;
             }
         }
-        warnings?.Add($"[dev] relay-init dev 语义：port={DefaultRelayPort}、providers baseURL→{MockBaseUrl}、空 key 播种为 mock-<id> 假 key");
+        warnings?.Add($"[dev] relay-init dev 语义：providers baseURL→{MockBaseUrl}、空 key 播种为 mock-<id> 假 key" +
+                     (opts.Port == DefaultRelayPort ? $"、port={DefaultRelayPort}" : $"、port 保留用户显式值 {opts.Port}"));
     }
 }
