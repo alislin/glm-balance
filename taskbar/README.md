@@ -106,7 +106,7 @@ OK
 
 ## 模型中转（relay）
 
-在任务栏程序内内嵌**本机 OpenAI 兼容中转服务**：opencode 等 OpenAI 兼容客户端把 baseURL 指向 `http://127.0.0.1:8787/v1`，请求按渠道优先级转发到智谱 Coding / 自定义中转 等上游，配额耗尽或出错时自动失败转移。
+在任务栏程序内内嵌**本机 OpenAI 兼容中转服务**：opencode 等 OpenAI 兼容客户端把 baseURL 指向 `http://127.0.0.1:8787/v1`，请求按渠道优先级转发到智谱 Coding / 自定义中转等上游，配额耗尽或出错时自动失败转移。
 
 ```
 opencode (localrelay provider) ──http://127.0.0.1:8787/v1──▶ GlmBalanceTaskbar.exe
@@ -119,7 +119,7 @@ opencode (localrelay provider) ──http://127.0.0.1:8787/v1──▶ GlmBalanc
 
 ### 启用方式
 
-**首启引导（推荐）**：配置无 `relay` 段时，详情窗口「模型中转」分组显示「启用中转」开关——点按即自动生成完整 `relay` 段（端口 8787、自动生成 localToken、播种 zhipu-coding / custom-relay 渠道）并启动运行时，无需手工编辑配置文件；随后在管理面板 Provider 池为 custom-relay 填写 API Key 即完成接入。也可随时用同一开关关闭/再启用（运行时启停，不重启程序；关闭前会确认）。
+**首启引导（推荐）**：配置无 `relay` 段时，详情窗口「模型中转」分组显示「启用中转」开关——点按即自动生成完整 `relay` 段（端口 8787、自动生成 localToken、播种 zhipu-coding / custom-relay 渠道）并启动运行时，无需手工编辑配置文件；随后在管理面板 Provider 池为 custom-relay 填写上游地址与 API Key 即完成接入。也可随时用同一开关关闭/再启用（运行时启停，不重启程序；关闭前会确认）。
 
 手工方式：在 **exe 同目录** `glmbalance-taskbar.json` 中加入 `relay` 段（该段整体缺省 → 中转关闭，原功能零影响）：
 
@@ -141,7 +141,7 @@ opencode (localrelay provider) ──http://127.0.0.1:8787/v1──▶ GlmBalanc
         "models": ["glm-5.3-flash", "glm-5.3"], "enabled": true },
       { "id": "custom-relay", "name": "自定义中转", "priority": 2, "probe": "none",
         "baseURL": "https://your-relay.example.com/v1",
-        "apiKey": "<你的 custom-relay key>",
+        "apiKey": "<该中转的 key>",
         "models": ["glm-5.3-flash", "glm-5.3"], "enabled": true }
     ],
     "agents": { "pi": { "configPath": "" } }
@@ -249,7 +249,7 @@ ESC 取消回滚）；总览顶部横幅在强制通道不可用时给出原因�
 ### 红线说明
 
 - apiKey 只写不读：任何 API 响应、`/status`、日志中 key 一律掩码（`sk-…后4位`）；不把明文 key 写进 git 仓库内任何文件。
-- 发现/部署功能**绝不删除或修改** opencode.json 中既有 provider 条目（`zhipuai-coding-plan` 与 `custom-relay` 是插件与 relay 取 key 的共同数据源）。
+- 发现/部署功能**绝不删除或修改** opencode.json 中既有 provider 条目（本地 opencode.json 的既有 provider 条目是插件与 relay 取 key 的共同数据源）。
 - 配置写回只有一条路径（JsonNode 合并写回 `glmbalance-taskbar.json`，保留文件其他字段）。
 - 中转仅监听本机回环；日志与错误汇总不含请求体内容。
 

@@ -184,7 +184,7 @@ dev 配置文件（`%LOCALAPPDATA%\GlmBalanceTaskbar-dev\glmbalance-taskbar.json
     "quota": { "fiveHourRemainingPct": 80, "weekRemainingPct": 60 },
     "providers": {
       "zhipu-coding": { "chatStatus": 200, "modelsStatus": 200 },
-      "custom-relay":       { "chatStatus": 200, "modelsStatus": 200 }
+      "custom-relay": { "chatStatus": 200, "modelsStatus": 200 }
     }
   }
 }

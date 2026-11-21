@@ -278,7 +278,7 @@ public sealed class RelayManager : IDisposable
         if (ok)
         {
             _opts.Seeded = false;
-            warnings.Add("relay 段已生成：enabled=true、port=8787、localToken 自动生成、providers 播种 zhipu-coding/custom-relay（custom-relay 需在 Provider 池填写 key）");
+            warnings.Add("relay 段已生成：enabled=true、port=8787、localToken 自动生成、providers 播种 zhipu-coding/custom-relay（custom-relay 需在 Provider 池填写地址与 key）");
         }
         return ok;
     }
