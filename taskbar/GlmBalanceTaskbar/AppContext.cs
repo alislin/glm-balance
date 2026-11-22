@@ -180,14 +180,17 @@ sealed class AppContext : ApplicationContext
 
     // ─────────────────────────── 自启动分组（G2/§2.2/§2.5/§5 S1） ───────────────────────────
 
-    /// <summary>主开关：未注册 → 注册流；已注册 → 注销流（提权子命令，UAC）。</summary>
+    /// <summary>主开关：未注册 → 注册流；已注册/查询被拒 → 注销流（提权子命令，UAC）。
+    /// Locked（查询被拒）走注销流：误判时注销流幂等兜底——/Delete 报「找不到」按注销成功，
+    /// 刷新后恢复未注册态。</summary>
     async Task ToggleAutostartAsync()
     {
         if (DevMode.IsDev) return; // dev 硬禁（区块不创建，防御双保险，R5）
         if (Interlocked.CompareExchange(ref _relayBusy, 1, 0) != 0) return; // 与 relay 开关共用重入保护
         try
         {
-            if (ScheduledTask.Exists()) await UnregisterAutostartAsync().ConfigureAwait(true);
+            var state = ScheduledTask.ExistsState(); // 三态：No=注册流；Yes/Locked=注销流（Locked 宁可信其存在）
+            if (state != ScheduledTask.TaskExistsState.No) await UnregisterAutostartAsync().ConfigureAwait(true);
             else await RegisterAutostartAsync().ConfigureAwait(true);
             RefreshAutostartState(); // §2.5：注册/注销后刷新注册态
         }
@@ -386,28 +389,35 @@ sealed class AppContext : ApplicationContext
         RefreshAutostartState();
     }
 
-    /// <summary>自启动注册态刷新（§2.5：schtasks /Query 仅取退出码；「运行中」态复用委托探活缓存）。</summary>
+    /// <summary>自启动注册态刷新（§2.5：schtasks /Query 三态判定；「运行中」态复用委托探活缓存）。</summary>
     void RefreshAutostartState()
     {
         if (DevMode.IsDev) return;
-        var registered = ScheduledTask.Exists();
-        _form.UpdateAutostart(registered, AutostartStateText(registered), ScheduledTask.RunAtLogonEnabled());
+        var state = ScheduledTask.ExistsState();
+        var registered = state != ScheduledTask.TaskExistsState.No; // Locked（查询被拒）按「已注册」呈现
+        _form.UpdateAutostart(registered, AutostartStateText(state), ScheduledTask.RunAtLogonEnabled());
     }
 
-    /// <summary>状态行四态（§2.5）：「后台服务运行中」= 委托探活成功且 /status 的 Headless=true
-    /// （探活可能命中 UI 自身本地 relay，Headless 字段在本判定中为必用，R2-F2）。</summary>
-    string AutostartStateText(bool registered)
+    /// <summary>状态行（§2.5）：No=未注册；Yes/Locked=已注册，「后台服务运行中」= 委托探活成功且
+    /// /status 的 Headless=true（探活可能命中 UI 自身本地 relay，Headless 字段在本判定中为必用，
+    /// R2-F2）。Locked 在行尾注明状态查询需管理员权限。</summary>
+    string AutostartStateText(ScheduledTask.TaskExistsState state)
     {
-        if (!registered) return "未注册";
+        if (state == ScheduledTask.TaskExistsState.No) return "未注册";
+        string text;
         if (_delegated != null && _delegatedStatus is { Running: true, Headless: true })
         {
-            return "已注册 · 后台服务运行中（委托）";
+            text = "已注册 · 后台服务运行中（委托）";
         }
-        if (_relay is { Running: true })
+        else if (_relay is { Running: true })
         {
-            return "已注册 · 由本程序承载（后台服务未运行，下次开机交接）";
+            text = "已注册 · 由本程序承载（后台服务未运行，下次开机交接）";
         }
-        return "已注册 · 后台服务未运行";
+        else
+        {
+            text = "已注册 · 后台服务未运行";
+        }
+        return state == ScheduledTask.TaskExistsState.Locked ? text + "（状态查询需管理员权限）" : text;
     }
 
     /// <summary>开关重入保护（DetailForm 开关 / --auto-init-relay 钩子共用）。</summary>

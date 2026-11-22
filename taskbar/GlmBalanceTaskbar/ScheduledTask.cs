@@ -1,11 +1,15 @@
 using System.Diagnostics;
+using System.Globalization;
+using System.Text;
 using Microsoft.Win32;
 
 namespace GlmBalanceTaskbar;
 
 /// <summary>
 /// schtasks 计划任务封装 + HKCU Run 键读写（G2 自启动，§2.2/§2.5）。
-/// 任务名 GlmBalanceTaskbarRelay（扁平 ASCII 名）；Exists 仅取退出码不解析输出（本地化不可靠）；
+/// 任务名 GlmBalanceTaskbarRelay（扁平 ASCII 名）；存在性三态 ExistsState：exit 0=Yes、明确
+/// 「找不到」=No、其余非零（拒绝访问等）=Locked 按「已注册」推断——存在性检查先于权限检查，
+/// 普通权限查 SYSTEM+ONSTART 任务被拒 ≠ 未注册；
 /// 「是否在运行」改用 /health 探活判定（AppContext 委托态，§2.4）。
 /// 提权子命令入口（--task-register / --task-unregister，管理员上下文）：执行 schtasks 并以
 /// MessageBox 报告结果（WinExe 可直接弹窗），随后退出——本文件含 WinForms 引用，但仅被
@@ -22,6 +26,17 @@ static class ScheduledTask
 
     // ─────────────────────────── schtasks 封装 ───────────────────────────
 
+    // schtasks 控制台输出用 OEM 代码页（中文系统 936、英文系统 437）。不显式指定时 .NET 按控制台
+    // 默认编码解码，中文「找不到」因编码失配成乱码、白名单永远匹配不上 → 全部误判 Locked。
+    // CodePagesEncodingProvider 随 WindowsDesktop 框架自带（WinForms 依赖链），零 NuGet。
+    static readonly Encoding SchtasksOutputEncoding = CreateSchtasksOutputEncoding();
+
+    static Encoding CreateSchtasksOutputEncoding()
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        return Encoding.GetEncoding(CultureInfo.CurrentCulture.TextInfo.OEMCodePage);
+    }
+
     static (int Code, string Output) RunSchtasks(string arguments)
     {
         try
@@ -32,6 +47,8 @@ static class ScheduledTask
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
+                StandardOutputEncoding = SchtasksOutputEncoding,
+                StandardErrorEncoding = SchtasksOutputEncoding,
             });
             if (p == null) return (1, "schtasks 启动失败");
             var stdout = p.StandardOutput.ReadToEnd();
@@ -45,8 +62,28 @@ static class ScheduledTask
         }
     }
 
-    /// <summary>任务是否存在（仅取退出码：0=存在，1=不存在；不解析输出文本）。</summary>
-    public static bool Exists() => RunSchtasks($"/Query /TN \"{TaskName}\"").Code == 0;
+    /// <summary>任务存在性三态：Yes=确定存在；No=确定不存在；Locked=无法确认（按已注册推断）。</summary>
+    public enum TaskExistsState { Yes, No, Locked }
+
+    /// <summary>
+    /// 任务存在性三态（schtasks /Query）：Yes=exit 0；No=非零且输出匹配「找不到」白名单（中英，
+    /// 不区分大小写——实测：查询不存在的任务返回「错误: 系统找不到指定的文件」/"cannot find"，
+    /// 与「拒绝访问」错误形态可区分）；Locked=其余一切非零（拒绝访问等）——SYSTEM+ONSTART 任务
+    /// 默认安全描述符拒普通用户查询，存在性按「已注册」推断：宁可信其存在，不可误报未注册。
+    /// </summary>
+    public static TaskExistsState ExistsState() =>
+        ClassifyExists(RunSchtasks($"/Query /TN \"{TaskName}\""));
+
+    /// <summary>判定核心：仅 exit 0 与明确「找不到」可下结论，其余非零一律 Locked（白名单严格）。</summary>
+    static TaskExistsState ClassifyExists((int Code, string Output) result) =>
+        result.Code == 0 ? TaskExistsState.Yes
+        : OutputSaysNotFound(result.Output) ? TaskExistsState.No
+        : TaskExistsState.Locked;
+
+    /// <summary>输出是否明确「任务不存在」（中英白名单，不区分大小写；仅此形态可判 No）。</summary>
+    static bool OutputSaysNotFound(string output) =>
+        output.Contains("找不到") ||
+        output.Contains("cannot find", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// /Create /F 注册开机 SYSTEM 任务（/SC ONSTART /RU SYSTEM）。
@@ -142,7 +179,10 @@ static class ScheduledTask
     /// <summary>
     /// --task-unregister：按序 /End（停任务实例）→ 探活 /health（仍存活则 /api/shutdown 兜底，
     /// Bearer token 从 exe 同目录配置读取，§2.5）→ /Delete /F，弹窗报告。
-    /// 退出码：0 = 注销完成（含兜底停止失败——任务已删、下次开机不再运行），1 = /Delete 失败。
+    /// /Delete 失败按三态复查（C-F3 幂等）：输出明确「找不到」= 任务本就不存在 → 幂等成功；
+    /// /Query 复查 Yes = 任务仍在 → 报错；No = 已不存在 → 幂等成功（注明「任务不存在，视为未注册」）；
+    /// Locked = 无法确认 → 不得判「仍存在」失败，按注销成功处理并加提示。
+    /// 退出码：0 = 注销完成（含幂等清理——任务已删/不存在，下次开机不再运行），1 = /Delete 失败且任务仍在。
     /// </summary>
     public static int RunUnregisterCommand()
     {
@@ -150,19 +190,33 @@ static class ScheduledTask
         EndTask();          // 失败不阻塞（任务可能未在运行）
         ShutdownRunningHeadless(notes); // /api/shutdown 兜底（手工启动的诊断用 headless 不受 /End 管辖）
         var (code, output) = RunSchtasks($"/Delete /TN \"{TaskName}\" /F");
-        if (code != 0 && Exists())
+        var goneNote = "";
+        if (code != 0)
         {
-            // C-F3：/Delete 失败且任务确实仍在（非「任务已被外部删除」场景）→ 报错；
-            // 已不存在则按注销成功处理（幂等清理，与设计 §7 R7 一致）
-            MessageBox.Show(
-                "注销失败：" + (output.Length > 0 ? output : "schtasks 返回非零退出码") +
-                $"\n\n可手动执行：schtasks /Delete /TN \"{TaskName}\" /F",
-                "注销开机服务", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return 1;
+            // C-F3：/Delete 失败 ≠ 任务仍在——输出明确「找不到」直接判不存在（幂等清理，与设计
+            // §7 R7 一致）；否则按 /Query 三态复查（Locked 时不得判「仍存在」失败）
+            var state = OutputSaysNotFound(output) ? TaskExistsState.No : ExistsState();
+            if (state == TaskExistsState.Yes)
+            {
+                MessageBox.Show(
+                    "注销失败：" + (output.Length > 0 ? output : "schtasks 返回非零退出码") +
+                    $"\n\n可手动执行：schtasks /Delete /TN \"{TaskName}\" /F",
+                    "注销开机服务", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return 1;
+            }
+            if (state == TaskExistsState.No)
+            {
+                goneNote = "\n\n任务不存在，视为未注册。";
+            }
+            else
+            {
+                notes.Add($"任务状态查询受限（需管理员权限），无法确认删除结果；" +
+                          $"若下次开机仍自启，请以管理员执行：schtasks /Delete /TN \"{TaskName}\" /F");
+            }
         }
         var tail = notes.Count > 0 ? "\n\n" + string.Join("\n", notes) : "";
         MessageBox.Show(
-            $"开机后台服务已注销：计划任务已删除，运行中的后台进程已停止。{tail}",
+            $"开机后台服务已注销：计划任务已删除，运行中的后台进程已停止。{goneNote}{tail}",
             "注销开机服务", MessageBoxButtons.OK, MessageBoxIcon.Information);
         return 0;
     }
