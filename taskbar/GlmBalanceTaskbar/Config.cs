@@ -3,6 +3,26 @@ using System.Text.RegularExpressions;
 
 namespace GlmBalanceTaskbar;
 
+/// <summary>
+/// key 链 home 重定向单一静态点（§2.3 方案 A）：headless 以 <c>--config-dir &lt;profile&gt;</c> 注入
+/// 用户 profile 根（SYSTEM 账户下仍能解析 auth.json / opencode 配置链，且跟随 key 轮换不冻结）。
+/// null（未注入）= 逐字节现状（Environment.GetFolderPath(UserProfile)）。仅影响
+/// auth.json / opencode.json / tui.json 读取链与发现/部署的 home 三处（Config / OpenCodeConfigSource /
+/// OpenCodeDeployer）；配置文件本体（glmbalance-taskbar.json）位置不受影响，恒为 exe 同目录。
+/// </summary>
+public static class HomeOverride
+{
+    static string? _path;
+
+    /// <summary>注入重定向（headless 启动早期调用一次；null/空白 = 清除，回到现状）。</summary>
+    public static void Set(string? path) =>
+        _path = string.IsNullOrWhiteSpace(path) ? null : path;
+
+    /// <summary>key 链 home：重定向值优先，否则现状 UserProfile（null 时与原实现逐字节一致，G6）。</summary>
+    public static string GetUserProfile() =>
+        _path ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+}
+
 public sealed class AppConfig
 {
     public string? ApiKey { get; set; }
@@ -32,7 +52,7 @@ public sealed class AppConfig
     public static AppConfig Load(string? configDir = null)
     {
         var cfg = new AppConfig();
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var home = HomeOverride.GetUserProfile(); // §2.3：经单一重定向点（null = 现状逐字节一致）
 
         string? ovBase = null, tuiBase = null, providerBase = null, providerKey = null;
         string? tuiOrg = null, tuiProject = null;

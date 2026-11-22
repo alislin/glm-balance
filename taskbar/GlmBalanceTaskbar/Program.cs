@@ -38,7 +38,7 @@ static class Program
     [STAThread]
     static int Main(string[] args)
     {
-        // --dev 必须最先解析（在 --once / --dump-icon / --relay-init 判定之前，组合语义才生效）
+        // --dev 必须最先解析（在 --once / --dump-icon / --relay-init / --headless 判定之前，组合语义才生效）
         DevMode.Initialize(args);
         AssertProductionIdentifiersUnchanged();
 
@@ -58,6 +58,36 @@ static class Program
             return RunRelayInit(args[relayInitIdx + 1]);
         }
 
+        // headless / 提权子命令早退分派（R1-F3：在 ApplicationConfiguration.Initialize() 之前，
+        // WinForms 既不初始化也不可达）。dev 硬禁置于分支最前（§2.2：--dev 与 --headless/--task-*
+        // 组合一律报错 exit≠0；dev 禁止注册/运行系统任务）。Main 收缩为纯参数分派——
+        // 本方法体的 IL 不得含任何类型图可达 WinForms 的引用（JIT 按方法粒度编译 Main 时会解析
+        // 方法体内全部类型引用，UI 块已整体抽入 RunUi，见 §2.1；验收锚点 A2：headless 进程模块
+        // 列表不含 System.Windows.Forms.dll）。
+        var taskCmd = args.Any(a => a.Equals("--task-register", StringComparison.OrdinalIgnoreCase)) ? "--task-register"
+            : args.Any(a => a.Equals("--task-unregister", StringComparison.OrdinalIgnoreCase)) ? "--task-unregister"
+            : null;
+        if (DevMode.IsHeadless || taskCmd != null)
+        {
+            if (DevMode.IsDev)
+            {
+                AttachParentConsole();
+                Console.WriteLine("error: --dev 与 --headless/--task-register/--task-unregister 组合被禁止（dev 实例禁止运行/注册系统任务）");
+                return 1;
+            }
+            if (DevMode.IsHeadless) return HeadlessRunner.Run(args);
+            return taskCmd == "--task-register" ? ScheduledTask.RunRegisterCommand() : ScheduledTask.RunUnregisterCommand();
+        }
+
+        return RunUi();
+    }
+
+    /// <summary>
+    /// UI 启动块（原 Main L61–129 整体抽取，R1-F3）：WinForms 初始化、单实例互斥、AppContext
+    /// 构造、单实例恢复 watcher 线程、消息循环与异常兜底。headless 路径绝不进入本方法。
+    /// </summary>
+    static int RunUi()
+    {
         ApplicationConfiguration.Initialize();
         TrySetAppUserModelId();
 
@@ -85,7 +115,7 @@ static class Program
             DevMode.ApplyMockOverrides(cfg);
             cfg.Warnings.AddRange(DevMode.DrainWarnings());
 
-            // m3：进程内 mock upstream（8789）生命周期显式化——保存静态引用，Main 退出时 Dispose。
+            // m3：进程内 mock upstream（8789）生命周期显式化——保存静态引用，RunUi 退出时 Dispose。
             // 失败 → 仅记录 warning 继续（relay Start() 有 "mock 未运行拒绝启动" 前置，
             // 宁可失败不可打真实上游，§5.5）；托盘/配额轮询同被打到 mock 地址（失败即显示错误）。
             try

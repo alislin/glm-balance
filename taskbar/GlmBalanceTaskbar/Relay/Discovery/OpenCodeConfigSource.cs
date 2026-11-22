@@ -12,7 +12,7 @@ public sealed class OpenCodeConfigSource : IAgentConfigSource
 
     public Task<IReadOnlyList<DiscoveredProvider>> DiscoverAsync(CancellationToken ct = default)
     {
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var home = HomeOverride.GetUserProfile(); // §2.3：home 重定向（SYSTEM 下修复落 systemprofile）
         var byId = new Dictionary<string, DiscoveredProvider>(StringComparer.Ordinal);
 
         // 1) auth.json：条目名即 provider id，key 在 entry.key

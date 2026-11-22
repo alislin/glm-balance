@@ -18,7 +18,7 @@ public sealed class OpenCodeDeployer : IAgentDeployer
 
     public OpenCodeDeployer()
     {
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var home = HomeOverride.GetUserProfile(); // §2.3：home 重定向（仅 home 来源变化，逻辑零改动）
         ConfigPath = Path.Combine(home, ".config", "opencode", "opencode.json");
     }
 

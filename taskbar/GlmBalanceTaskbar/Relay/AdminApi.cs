@@ -49,6 +49,10 @@ public sealed class AdminApi
                     await HandleSettingsAsync(req, rsp, method).ConfigureAwait(false);
                     return;
 
+                case "shutdown" when method == "POST":
+                    await HandleShutdownAsync(req, rsp).ConfigureAwait(false);
+                    return;
+
                 case "logs" when method == "GET":
                     var tail = QueryInt(req, "tail", 200);
                     await WriteAsync(rsp, 200, RelayJson.Serialize(new { entries = _mgr.LogTail(Math.Clamp(tail, 1, 500)) }))
@@ -466,6 +470,55 @@ public sealed class AdminApi
     }
 
     // ─────────────────────────── 辅助 ───────────────────────────
+
+    /// <summary>
+    /// POST /api/shutdown：headless 进程自终止（注销流兜底，§2.5）。
+    /// 仅 --headless 进程生效（UI 进程承载 relay 时拒绝——终止的是整个托盘程序，绝不允许远程触发）。
+    /// 端点单点加固（R1-F6）：EffectiveToken 为空（免鉴权本身是故障态）直接 403；Host 头必须等于
+    /// 127.0.0.1:&lt;port&gt;（简单 POST 无自定义头、无 CORS 预检，免鉴权态下回环 DNS rebinding 页面
+    /// 即可触发进程终止，一行实现成本消除最坏分支）；Bearer 语义同既有 /api/*；响应不含任何敏感字段。
+    /// </summary>
+    async Task HandleShutdownAsync(HttpListenerRequest req, HttpListenerResponse rsp)
+    {
+        if (!DevMode.IsHeadless)
+        {
+            await WriteAsync(rsp, 403, "{\"error\":\"forbidden:not_headless\"}").ConfigureAwait(false);
+            return;
+        }
+        var token = _mgr.EffectiveToken;
+        if (token.Length == 0)
+        {
+            await WriteAsync(rsp, 403, "{\"error\":\"forbidden:auth_disabled\"}").ConfigureAwait(false);
+            return;
+        }
+        var host = req.Headers["Host"] ?? "";
+        if (!host.Equals($"127.0.0.1:{_mgr.Options.Port}", StringComparison.Ordinal))
+        {
+            await WriteAsync(rsp, 403, "{\"error\":\"forbidden:bad_host\"}").ConfigureAwait(false);
+            return;
+        }
+        var auth = req.Headers["Authorization"] ?? "";
+        if (!auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+        {
+            await WriteAsync(rsp, 401, "{\"error\":\"unauthorized\"}").ConfigureAwait(false);
+            return;
+        }
+        var presented = auth["Bearer ".Length..].Trim();
+        var ok = System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(presented), Encoding.UTF8.GetBytes(token));
+        if (!ok)
+        {
+            await WriteAsync(rsp, 401, "{\"error\":\"unauthorized\"}").ConfigureAwait(false);
+            return;
+        }
+        // 200 已提交（WriteAsync 内 rsp.Close()）：停运行时后进程退出（headless 无优雅停机钩子，§1 非目标）
+        await WriteAsync(rsp, 200, "{\"ok\":true}").ConfigureAwait(false);
+        _ = Task.Run(() =>
+        {
+            try { _mgr.Stop(); } catch { /* ignore */ }
+            Environment.Exit(0);
+        });
+    }
 
     /// <summary>API 响应节点：key 一律掩码（只写不读），附 hasKey 供 UI 判断。</summary>
     static JsonObject ProviderToJson(ProviderRuntime rt)

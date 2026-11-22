@@ -60,11 +60,27 @@ sealed class DetailForm : Form
     readonly Button _btnRelayGuide;
     const int MaxRelayRows = 6;
 
+    // ── 自启动分组（G2/§2.5；dev 不创建，字段保持 null）──
+    readonly Label? _lblAutostartHeader;
+    readonly Label? _lblAutostartState;
+    readonly Button? _btnAutostartToggle;
+    readonly CheckBox? _chkRunAtLogon;
+    readonly Label? _lblAutostartNote;
+    bool _suppressRunAtLogonEvent; // 程序化设置勾选态时不外派事件（防回环）
+
+    // ── 委托态（G3/§2.4）：只读渲染参数 ──
+    bool _delegated;
+    string? _delegatedHint;
+
     readonly List<Section> _sections;
     bool _reallyExit;
     int _desiredHeight = 588;
     /// <summary>最近一次 UpdateRelay 收到的快照（右键菜单读 pin 态用）。</summary>
     RelayStatus? _lastRelayStatus;
+
+    /// <summary>渠道行共享字体（M5：每刷新 4+ 次 new Font → 静态复用；共享 Font 不可 Dispose，进程生命周期）。</summary>
+    static readonly Font RelayRowFont = new("Segoe UI", 8.5F);
+    static readonly Font RelayRowCurrentFont = new("Segoe UI", 9F, FontStyle.Bold);
 
     /// <summary>用户点击"立即刷新"。</summary>
     public event EventHandler? RefreshRequested;
@@ -77,6 +93,12 @@ sealed class DetailForm : Form
 
     /// <summary>用户在渠道行右键菜单选择"强制路由到 {id} / 解除强制"（pin=true 设为强制）。</summary>
     public event EventHandler<(string ProviderId, bool Pin)>? PinRequested;
+
+    /// <summary>用户点击「注册/注销开机服务」主开关（AppContext 按当前注册态分流）。</summary>
+    public event EventHandler? AutostartToggleRequested;
+
+    /// <summary>用户切换「登录时启动（仅界面）」副开关（HKCU Run）。</summary>
+    public event EventHandler<bool>? RunAtLogonChangeRequested;
 
     public DetailForm()
     {
@@ -138,6 +160,38 @@ sealed class DetailForm : Form
         _lblModels = AddLabel("", PageMargin, 0, W - PageMargin * 2, 72);
         _lblUpdated = AddLabel("", 116, 0, 126, 18, muted: true);
 
+        // 自启动分组（G2/§2.5：位于「模型中转」区块之后；dev 硬禁整个区块不创建，R5）
+        if (!DevMode.IsDev)
+        {
+            _lblAutostartHeader = AddLabel("自启动", PageMargin, 0, 200, 20, muted: true, bold: true);
+            _lblAutostartState = AddLabel("未注册", PageMargin, 0, W - PageMargin * 2, 20);
+            _btnAutostartToggle = new Button
+            {
+                Text = "注册开机服务（无需登录）",
+                Location = new Point(PageMargin, 0),
+                Size = new Size(180, 26),
+            };
+            _btnAutostartToggle.Click += (_, _) => AutostartToggleRequested?.Invoke(this, EventArgs.Empty);
+            Controls.Add(_btnAutostartToggle);
+            _chkRunAtLogon = new CheckBox
+            {
+                Text = "登录时启动（仅界面）",
+                Location = new Point(PageMargin, 0),
+                AutoSize = true,
+            };
+            _chkRunAtLogon.CheckedChanged += (_, _) =>
+            {
+                if (!_suppressRunAtLogonEvent)
+                {
+                    RunAtLogonChangeRequested?.Invoke(this, _chkRunAtLogon.Checked);
+                }
+            };
+            Controls.Add(_chkRunAtLogon);
+            _lblAutostartNote = AddLabel(
+                "开机服务独立于本窗口运行；登录后本程序仅显示用量。",
+                PageMargin, 0, W - PageMargin * 2, 20, muted: true, fontSize: 8.5F);
+        }
+
         _btnPanel = new Button { Text = "管理面板", Location = new Point(PageMargin, 0), Size = new Size(92, 28) };
         _btnPanel.Click += (_, _) => PanelRequested?.Invoke(this, EventArgs.Empty);
         Controls.Add(_btnPanel);
@@ -188,8 +242,12 @@ sealed class DetailForm : Form
                 },
             },
             RelaySection(),
-            new() { Rows = { new Row { Controls = new Control[] { _lblModels }, Height = () => _lblModels.Height } } },
         };
+        if (!DevMode.IsDev)
+        {
+            _sections.Add(AutostartSection());
+        }
+        _sections.Add(new() { Rows = { new Row { Controls = new Control[] { _lblModels }, Height = () => _lblModels.Height } } });
 
         Relayout();
     }
@@ -204,10 +262,8 @@ sealed class DetailForm : Form
         detail = AddLabel("", PageMargin, 0, W - PageMargin * 2, 20, muted: true);
     }
 
-    /// <summary>
-    /// 「模型中转」区块：标题行（含启停开关）+ 说明行（未初始化）+ 引导按钮行（运行中缺 key）+
-    /// 每渠道一行（随 UpdateRelay 显隐）。
-    /// </summary>
+    /// <summary>「模型中转」区块：标题行（含启停开关）+ 说明行（未初始化）+ 引导按钮行（运行中缺 key）+
+    /// 每渠道一行（随 UpdateRelay 显隐）。</summary>
     Section RelaySection()
     {
         var s = new Section();
@@ -218,6 +274,18 @@ sealed class DetailForm : Form
         {
             s.Rows.Add(new Row { Controls = new Control[] { lbl }, Height = () => lbl.Visible ? 20 : 0 });
         }
+        return s;
+    }
+
+    /// <summary>「自启动」区块（§2.5）：状态行四态 + 注册/注销主开关 + 登录时启动副开关 + 说明行。</summary>
+    Section AutostartSection()
+    {
+        var s = new Section();
+        s.Rows.Add(new Row { Controls = new Control[] { _lblAutostartHeader! }, Height = () => 20 });
+        s.Rows.Add(new Row { Controls = new Control[] { _lblAutostartState! }, Height = () => _lblAutostartState!.Visible ? 20 : 0 });
+        s.Rows.Add(new Row { Controls = new Control[] { _btnAutostartToggle! }, Height = () => 26 });
+        s.Rows.Add(new Row { Controls = new Control[] { _chkRunAtLogon! }, Height = () => 24 });
+        s.Rows.Add(new Row { Controls = new Control[] { _lblAutostartNote! }, Height = () => 20 });
         return s;
     }
 
@@ -263,11 +331,41 @@ sealed class DetailForm : Form
         Relayout();
     }
 
+    /// <summary>自启动分组状态刷新（AppContext 调用；§2.5 四态状态行 + 主/副开关渲染；dev 区块不创建）。</summary>
+    public void UpdateAutostart(bool registered, string stateText, bool runAtLogon)
+    {
+        if (_btnAutostartToggle == null) return;
+        _lblAutostartState!.Text = stateText;
+        _lblAutostartState!.Visible = stateText.Length > 0;
+        _btnAutostartToggle.Text = registered ? "注销开机服务" : "注册开机服务（无需登录）";
+        _suppressRunAtLogonEvent = true;
+        try
+        {
+            _chkRunAtLogon!.Checked = runAtLogon;
+        }
+        finally
+        {
+            _suppressRunAtLogonEvent = false;
+        }
+    }
+
+    /// <summary>
+    /// 委托态渲染（G3/§2.4）：禁用 relay 开关（只读）+ 提示文案；UpdateRelay 的说明行渲染
+    /// 依此分流（委托 hint 与未初始化 hint 互斥，避免互踩）。hint 文案由 AppContext 提供。
+    /// </summary>
+    public void SetDelegated(bool delegated, string? hint)
+    {
+        _delegated = delegated;
+        _delegatedHint = hint;
+        _btnRelayToggle.Enabled = !delegated;
+    }
+
     /// <summary>
     /// 更新「模型中转」分组（随刷新节流调用）。三态：
     /// 未初始化（无 relay 段）→ 开关「启用中转」+ 一句话说明；
     /// 显式关闭 → 开关「启用中转」（保留既有配置，点按后原样启用）；
     /// 运行 → 开关「关闭中转」+ 渠道行；启用但存在缺 key 渠道 → 引导态（列待完成项 + 打开面板按钮）。
+    /// 委托态：hint 行显示委托文案，开关已禁用（SetDelegated）。
     /// </summary>
     public void UpdateRelay(RelayStatus? st)
     {
@@ -275,10 +373,14 @@ sealed class DetailForm : Form
         var running = st is { Running: true };
         _btnRelayToggle.Text = running ? "关闭中转" : "启用中转";
 
-        // 未初始化说明行（仅未初始化且未运行时显示）
-        var showHint = st is { Initialized: false } && !running;
+        // 说明行（委托态 → 委托文案；未初始化且未运行 → 引导说明；互斥）
+        var showHint = _delegated || (st is { Initialized: false } && !running);
         _lblRelayHint.Visible = showHint;
-        if (showHint)
+        if (_delegated)
+        {
+            _lblRelayHint.Text = _delegatedHint ?? "中转由后台服务运行（只读）；启停请用管理面板。";
+        }
+        else if (showHint)
         {
             _lblRelayHint.Text = "尚未初始化：点击「启用中转」自动生成配置并启动本地中转服务。";
         }
@@ -305,14 +407,14 @@ sealed class DetailForm : Form
                     // 被 pin 的 no-key 渠道行无 [强制] 前缀属预期；总览横幅仍可见）
                     lbl.Text = $"  {p.Id}：请在 Provider 池填写 API Key";
                     lbl.ForeColor = Colors.Warning;
-                    lbl.Font = new Font("Segoe UI", 8.5F);
+                    lbl.Font = RelayRowFont;
                 }
                 else
                 {
                     var (text, color, isCurrent) = RelayRowText(p, st.CurrentId, forcedId);
                     lbl.Text = text;
                     lbl.ForeColor = color;
-                    lbl.Font = new Font("Segoe UI", isCurrent ? 9F : 8.5F, isCurrent ? FontStyle.Bold : FontStyle.Regular);
+                    lbl.Font = isCurrent ? RelayRowCurrentFont : RelayRowFont;
                 }
             }
             if (rows.Count > MaxRelayRows)
@@ -320,7 +422,7 @@ sealed class DetailForm : Form
                 _lblRelayRows[^1].Visible = true;
                 _lblRelayRows[^1].Text = $"  …共 {rows.Count} 个渠道";
                 _lblRelayRows[^1].ForeColor = Colors.Muted;
-                _lblRelayRows[^1].Font = new Font("Segoe UI", 8.5F);
+                _lblRelayRows[^1].Font = RelayRowFont;
             }
         }
         // 隐藏多余行（F1 回归修复：补回改前基线循环）——中转停止后渠道 Label 残留旧文本、
@@ -340,6 +442,7 @@ sealed class DetailForm : Form
     void ShowRelayRowMenu(Label row, MouseEventArgs e)
     {
         if (e.Button != MouseButtons.Right) return;
+        if (_delegated) return; // 委托态禁 pin 菜单（pin 是 headless 进程内存态，UI 无 token 不代理写，§2.4）
         var st = _lastRelayStatus;
         if (st is not { Running: true }) return;
         var forcedId = st.Forced?.Id;

@@ -20,4 +20,13 @@
     <EmbeddedResource Include="Relay\admin.html" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- GC 运行时调优（M6，§2.6）：键名与取值范围经官方 GC 配置文档核实（R1-F1 教训：错误键名会被
+         运行时静默忽略、收益虚置）。ConserveMemory 取值 0–9、默认 0，.NET 6+ 生效（Workstation GC 适用）；
+         Concurrent=false 关后台 GC（低分配应用阻塞式回收无感）。零 NuGet；DATAS 为 Server GC 专属、
+         本项目不适用（R2-F1）。发布产物形态不变（PublishSingleFile 不动）。 -->
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="5" Trim="true" />
+    <RuntimeHostConfigurationOption Include="System.GC.Concurrent" Value="false" Trim="true" />
+  </ItemGroup>
+
 </Project>

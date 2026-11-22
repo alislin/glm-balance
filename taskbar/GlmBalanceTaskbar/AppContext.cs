@@ -18,13 +18,22 @@ sealed class AppContext : ApplicationContext
     readonly DetailForm _form;
     readonly NotifyIcon _tray;
     readonly System.Windows.Forms.Timer _timer;
-    readonly RelayManager _relay;
+    RelayManager _relay; // 非 readonly：S5 回退时以重载配置重建（R1-F8）
     TrayPreviewForm? _trayPreview;
     UsageSnapshot? _lastSnap;
     Icon? _icon;
     int _busy;
     DateTimeOffset _lastActivityFetch = DateTimeOffset.MinValue;
     ActivityInfo? _activity;
+
+    // ── 委托态（G3/§2.4）：探测到既有 relay 实例（headless/另一 UI）时只读渲染、零写盘 ──
+    DelegatedRelayClient? _delegated;      // null = 非委托态
+    RelayStatus? _delegatedStatus;         // 最近一次远端 /status 快照
+    int _delegatedFailures;                // 连续探活失败计数（N 次后 S5 回退）
+    System.Threading.Timer? _trimTimer;    // M7：工作集定时裁剪（改善观感）
+
+    /// <summary>委托探活连续失败回退阈值（S5：30s 节奏 × 3 ≈ 90s 宽限，覆盖 headless 重启窗口期）。</summary>
+    const int DelegatedFailureLimit = 3;
 
     public AppContext(AppConfig cfg)
     {
@@ -38,14 +47,19 @@ sealed class AppContext : ApplicationContext
         _form.PanelRequested += (_, _) => OpenAdminPanel();
         _form.RelayToggleRequested += (_, _) => _ = ToggleRelayAsync();
         // sticky pin 强制通道：托盘右键菜单外派 → 路由器置/清 pin → 立即刷新详情窗中转分组
+        // （委托态被 DetailForm.ShowRelayRowMenu 拦截，此处防御双保险）
         _form.PinRequested += (_, e) =>
         {
             var relay = _relay;
-            if (relay == null) return;
+            if (relay == null || _delegated != null) return;
             if (e.Pin) relay.Router.SetForced(e.ProviderId);
             else relay.Router.ClearForced(e.ProviderId);
             _form.UpdateRelay(relay.Snapshot());
         };
+
+        // 自启动分组（G2/§2.5）：注册/注销（提权子命令流，S1）与 HKCU Run 副开关接线
+        _form.AutostartToggleRequested += (_, _) => _ = ToggleAutostartAsync();
+        _form.RunAtLogonChangeRequested += (_, on) => SetRunAtLogon(on);
 
         // 中转：始终构造管理器（未初始化/显式关闭时开关与面板入口仍可用，消除静默无反应）；
         // 仅 enabled=true 时启动；启动失败只记 warnings，配额显示不受影响。
@@ -57,13 +71,49 @@ sealed class AppContext : ApplicationContext
         {
             DevMode.ApplyDevRelayDefaults(relayOpts, cfg.Warnings);
         }
+
+        // 委托探活（§2.4）：relay 启用时探测既有实例（400ms 超时，避免拖慢启动）；
+        // 委托态下 UI 不自起 relay、SetEnabled 不可达（开关禁用）→ 全程零写盘（单写者原则）。
+        DelegatedRelayClient? delegated = null;
+        RelayStatus? delegatedStatus = null;
+        if (cfg.Relay is { Enabled: true } probeTarget)
+        {
+            delegatedStatus = new DelegatedRelayClient(probeTarget.Port).ProbeOnce();
+            if (delegatedStatus is { Running: true })
+            {
+                delegated = new DelegatedRelayClient(probeTarget.Port);
+                _delegated = delegated;
+                _delegatedStatus = delegatedStatus;
+            }
+        }
+        var delegatedMode = delegated != null;
+
         var relay = new RelayManager(cfg, relayOpts, initialized: cfg.Relay != null);
-        if (cfg.Relay is { Enabled: true })
+        if (cfg.Relay is { Enabled: true } startTarget && !delegatedMode)
         {
             relay.Start(cfg.Warnings); // 失败原因写入 cfg.Warnings（详情窗可见）；实例保留供状态展示与 Dispose
+            // S4 启动竞态：本地 Start 失败（headless 或其他实例恰在启动窗口期）→ 补探活一次，
+            // 成功即切委托态（期间「端口占用」警告保留可见，不静默；下一刷新周期收敛，A15）
+            if (!relay.Running)
+            {
+                var retry = new DelegatedRelayClient(startTarget.Port).ProbeOnce();
+                if (retry is { Running: true })
+                {
+                    delegated = new DelegatedRelayClient(startTarget.Port);
+                    _delegated = delegated;
+                    _delegatedStatus = retry;
+                    cfg.Warnings.Add("本地中转启动失败：已由运行中的后台服务/其他实例承载（委托态，只读）。");
+                }
+            }
         }
         _relay = relay;
         _form.SetWarnings(cfg.Warnings); // M4：启动期警告（含 relay 启动失败）在详情窗可见
+
+        // 委托态 UI：禁用 relay 开关与 pin 菜单 + 提示文案（须在 UpdateRelay 首刷前设置）
+        if (_delegated != null)
+        {
+            _form.SetDelegated(true, DelegatedHint());
+        }
 
         // 系统托盘：动态数字图标（不设置 Text，避免与自绘多行摘要浮窗重叠出现两个 tooltip）
         _tray = new NotifyIcon
@@ -96,6 +146,17 @@ sealed class AppContext : ApplicationContext
         _timer.Tick += (_, _) => _ = RefreshAsync();
         _ = RefreshAsync(force: true);
         _timer.Start();
+
+        // M7：UI 最小化时裁剪 + 每 10 分钟定时裁剪（改善观感、非真实省内存）
+        _form.Resize += (_, _) =>
+        {
+            if (_form.WindowState == FormWindowState.Minimized) WorkingSetTrimmer.Trim();
+        };
+        _trimTimer = new System.Threading.Timer(
+            _ => WorkingSetTrimmer.Trim(), null, TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(10));
+
+        // 自启动注册态刷新（§2.5：详情窗打开时；schtasks /Query 子进程数十 ms，不做常驻轮询）
+        RefreshAutostartState();
     }
 
     /// <summary>单实例二次启动时恢复窗口。</summary>
@@ -108,12 +169,232 @@ sealed class AppContext : ApplicationContext
             {
                 _form.WindowState = FormWindowState.Normal;
                 _form.Activate();
+                RefreshAutostartState(); // §2.5：打开详情前刷新注册态缓存
             });
         }
         catch
         {
             /* ignore */
         }
+    }
+
+    // ─────────────────────────── 自启动分组（G2/§2.2/§2.5/§5 S1） ───────────────────────────
+
+    /// <summary>主开关：未注册 → 注册流；已注册 → 注销流（提权子命令，UAC）。</summary>
+    async Task ToggleAutostartAsync()
+    {
+        if (DevMode.IsDev) return; // dev 硬禁（区块不创建，防御双保险，R5）
+        if (Interlocked.CompareExchange(ref _relayBusy, 1, 0) != 0) return; // 与 relay 开关共用重入保护
+        try
+        {
+            if (ScheduledTask.Exists()) await UnregisterAutostartAsync().ConfigureAwait(true);
+            else await RegisterAutostartAsync().ConfigureAwait(true);
+            RefreshAutostartState(); // §2.5：注册/注销后刷新注册态
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _relayBusy, 0);
+        }
+    }
+
+    /// <summary>
+    /// 注册流（S1，R2-F2 时序）：确认框 → 本地 relay 让位（仅 Stop 停运行时，严禁
+    /// SetEnabled(false) 等任何写盘路径——否则 headless 读到 enabled=false 命中 E3 直接 exit 0）
+    /// → runas 自体子命令（UAC）→ ≤10s 探活为唯一成败判据（/Run 在任务引擎视角进程拉起即
+    /// 成功，headless 自行退出无失败信号）：成功 → 委托态；失败 → 本地 Start 回滚 + 弹窗。
+    /// UAC 取消分支同样回滚，避免静默断转发。
+    /// </summary>
+    async Task RegisterAutostartAsync()
+    {
+        var choice = MessageBox.Show(_form,
+            "将在任务计划程序注册开机后台服务（无需登录即可中转）。\n\n" +
+            "· 需要在 UAC 弹窗中确认管理员权限\n" +
+            "· 本地中转将短暂让位给后台服务\n\n继续注册？",
+            "注册开机服务", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (choice != DialogResult.Yes) return;
+
+        // 步骤 0：本地 relay 让位（仅停运行时，不写盘）
+        var wasLocalRunning = _relay is { Running: true };
+        if (wasLocalRunning)
+        {
+            try { _relay.Stop(); } catch { /* ignore */ }
+        }
+
+        // 步骤 1–2：自体提权子命令（同一 exe --task-register；管理员上下文内 /Create → /Run）
+        var elevateError = (string?)null;
+        try
+        {
+            var exe = Environment.ProcessPath ?? Environment.GetCommandLineArgs()[0];
+            using var p = Process.Start(new ProcessStartInfo(exe)
+            {
+                Verb = "runas",
+                UseShellExecute = true,
+                Arguments = "--task-register",
+            });
+            p?.WaitForExit();
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            // UAC 取消：零残留 + 本地 relay 回滚（防静默断转发）→ 回退提示
+            if (wasLocalRunning) RollbackLocalRelay();
+            ShowRegisterFallbackDialog("已取消授权，未创建任何任务。",
+                offerLogon: true);
+            return;
+        }
+        catch (Exception ex)
+        {
+            elevateError = ex.Message;
+        }
+        if (elevateError != null)
+        {
+            // 提权失败（非管理员组成员等）：回滚 + 双回退
+            if (wasLocalRunning) RollbackLocalRelay();
+            ShowRegisterFallbackDialog("无法启动提权子进程：" + elevateError, offerLogon: true);
+            return;
+        }
+
+        // 步骤 3：探活为唯一成败判据（≤10s）
+        if (await WaitHeadlessHealthyAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(true))
+        {
+            MessageBox.Show(_form,
+                "已注册：后台服务已启动，中转改由其承载。\n\n本窗口此后只读展示中转状态；" +
+                "启停请用管理面板或注销自启动。",
+                "注册开机服务", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        else
+        {
+            RollbackLocalRelay();
+            MessageBox.Show(_form,
+                "后台服务未启动，将在下次开机生效，期间由本程序承载。",
+                "注册开机服务", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    /// <summary>注销流：runas --task-unregister（子进程 /End → /api/shutdown 兜底 → /Delete /F 并弹窗）。
+    /// 注销后 headless 失联 → 既有 S5 通用回退在下一刷新周期恢复本地承载，此处无需特判。</summary>
+    async Task UnregisterAutostartAsync()
+    {
+        var choice = MessageBox.Show(_form,
+            "注销开机后台服务？\n\n· 运行中的后台中转将被停止\n· 下次开机不再自动运行中转\n\n继续注销？",
+            "注销开机服务", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (choice != DialogResult.Yes) return;
+        try
+        {
+            var exe = Environment.ProcessPath ?? Environment.GetCommandLineArgs()[0];
+            using var p = Process.Start(new ProcessStartInfo(exe)
+            {
+                Verb = "runas",
+                UseShellExecute = true,
+                Arguments = "--task-unregister",
+            });
+            p?.WaitForExit();
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            MessageBox.Show(_form, "已取消授权，未做任何更改。",
+                "注销开机服务", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(_form, "注销失败：" + ex.Message,
+                "注销开机服务", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        MessageBox.Show(_form,
+            "已注销：计划任务已删除，运行中的后台进程已停止。\n\n" +
+            "中转将由本程序自动重新承载（约 1–2 分钟内生效），或立即在详情窗点击「启用中转」。",
+            "注销开机服务", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    /// <summary>注册失败回滚：本地 Start 恢复承载（enabled 语义未动，零写盘）。</summary>
+    void RollbackLocalRelay()
+    {
+        try
+        {
+            var warnings = new List<string>();
+            _relay?.Start(warnings);
+            if (warnings.Count > 0)
+            {
+                _form.SetWarnings(_cfg.Warnings.Concat(warnings).ToList());
+            }
+            _form.UpdateRelay(_relay?.Snapshot());
+        }
+        catch
+        {
+            /* ignore */
+        }
+    }
+
+    /// <summary>注册回退对话框（§2.2 双回退）：降级注册「登录时启动」（HKCU Run，零提权）或手动指引。</summary>
+    void ShowRegisterFallbackDialog(string reason, bool offerLogon)
+    {
+        var buttons = offerLogon ? MessageBoxButtons.YesNoCancel : MessageBoxButtons.OK;
+        var text = reason +
+            "\n\n开机后台服务未能完成注册。" +
+            (offerLogon
+                ? "\n\n「是」= 改注册登录时启动（无需管理员，登录后由本程序承载中转）\n" +
+                  "「否」= 查看手动注册命令\n「取消」= 什么都不做"
+                : "");
+        var choice = MessageBox.Show(_form, text, "注册开机服务", buttons,
+            offerLogon ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+        if (offerLogon && choice == DialogResult.Yes)
+        {
+            if (ScheduledTask.SetRunAtLogon(true))
+            {
+                RefreshAutostartState();
+            }
+            else
+            {
+                MessageBox.Show(_form, "登录时启动设置失败（注册表写入被拒绝）。",
+                    "登录时启动", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+        else if (offerLogon && choice == DialogResult.No)
+        {
+            var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            MessageBox.Show(_form,
+                "在管理员终端执行以下命令完成注册：\n\n" + ScheduledTask.ManualRegisterCommand(profile),
+                "手动注册", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+    }
+
+    /// <summary>HKCU Run 副开关切换（零提权）；程序化设置触发的同值变更跳过（防回环）。</summary>
+    void SetRunAtLogon(bool enable)
+    {
+        if (DevMode.IsDev) return;
+        var current = ScheduledTask.RunAtLogonEnabled();
+        if (enable == current) return;
+        if (!ScheduledTask.SetRunAtLogon(enable))
+        {
+            MessageBox.Show(_form, "登录时启动设置失败（注册表写入被拒绝）。",
+                "登录时启动", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        RefreshAutostartState();
+    }
+
+    /// <summary>自启动注册态刷新（§2.5：schtasks /Query 仅取退出码；「运行中」态复用委托探活缓存）。</summary>
+    void RefreshAutostartState()
+    {
+        if (DevMode.IsDev) return;
+        var registered = ScheduledTask.Exists();
+        _form.UpdateAutostart(registered, AutostartStateText(registered), ScheduledTask.RunAtLogonEnabled());
+    }
+
+    /// <summary>状态行四态（§2.5）：「后台服务运行中」= 委托探活成功且 /status 的 Headless=true
+    /// （探活可能命中 UI 自身本地 relay，Headless 字段在本判定中为必用，R2-F2）。</summary>
+    string AutostartStateText(bool registered)
+    {
+        if (!registered) return "未注册";
+        if (_delegated != null && _delegatedStatus is { Running: true, Headless: true })
+        {
+            return "已注册 · 后台服务运行中（委托）";
+        }
+        if (_relay is { Running: true })
+        {
+            return "已注册 · 由本程序承载（后台服务未运行，下次开机交接）";
+        }
+        return "已注册 · 后台服务未运行";
     }
 
     /// <summary>开关重入保护（DetailForm 开关 / --auto-init-relay 钩子共用）。</summary>
@@ -126,7 +407,7 @@ sealed class AppContext : ApplicationContext
     async Task ToggleRelayAsync()
     {
         var relay = _relay;
-        if (relay == null) return;
+        if (relay == null || _delegated != null) return; // 委托态开关禁用（防御：零写盘，§2.4）
         if (Interlocked.CompareExchange(ref _relayBusy, 1, 0) != 0) return;
         try
         {
@@ -142,6 +423,8 @@ sealed class AppContext : ApplicationContext
             await Task.Run(() => relay.SetEnabled(enable, warnings)).ConfigureAwait(true);
             _form.SetWarnings(_cfg.Warnings.Concat(warnings).ToList());
             _form.UpdateRelay(relay.Snapshot());
+            // 非委托态在 relay 操作失败（本地 Start 端口被占等）后补探活一次，成功即切委托态（§2.4，S4）
+            if (!relay.Running && enable) ProbeDelegatedAfterStartFailure();
         }
         finally
         {
@@ -164,6 +447,11 @@ sealed class AppContext : ApplicationContext
 
             var snap = await _client.FetchUsageAsync().ConfigureAwait(true);
             snap.Activity = _activity;
+            // 委托态：随既有 30s 刷新节流一并重取 /status（§2.4；连续失败 N 次回退，S5）
+            if (_delegated != null)
+            {
+                await RefreshDelegatedStatusAsync().ConfigureAwait(true);
+            }
             Apply(snap);
         }
         catch (Exception ex)
@@ -174,6 +462,109 @@ sealed class AppContext : ApplicationContext
         {
             Interlocked.Exchange(ref _busy, 0);
         }
+    }
+
+    // ─────────────────────────── 委托态（G3/§2.4/§5 S1·S4·S5） ───────────────────────────
+
+    /// <summary>委托态 30s 节流刷新：拉取远端 /status；连续失败 N 次回退本地承载（S5）。</summary>
+    async Task RefreshDelegatedStatusAsync()
+    {
+        var st = await _delegated!.FetchStatusAsync().ConfigureAwait(true);
+        if (st is { Running: true })
+        {
+            _delegatedStatus = st;
+            _delegatedFailures = 0;
+            return;
+        }
+        _delegatedFailures++;
+        if (_delegatedFailures >= DelegatedFailureLimit)
+        {
+            FallBackToLocal();
+        }
+    }
+
+    /// <summary>
+    /// S5 回退：委托对象连续失联后回退「未委托」。先 AppConfig.Load 重载并以新配置重建
+    /// RelayManager 再本地 Start（R1-F8：委托期间 admin 面板对 providers/port/参数的变更不在
+    /// 构造期 _opts 中，不重载会用过时池启动；UI 委托态全程零写盘，重载零副作用）。
+    /// Start 失败（headless 恰在重启等）→ S4 补探活，成功即切回委托态。
+    /// </summary>
+    void FallBackToLocal()
+    {
+        _delegated = null;
+        _delegatedStatus = null;
+        _delegatedFailures = 0;
+        _form.SetDelegated(false, null);
+        try
+        {
+            var fresh = AppConfig.Load(DevMode.IsDev ? DevMode.ConfigRoot : null);
+            if (DevMode.IsDev) DevMode.ApplyMockOverrides(fresh);
+            var opts = fresh.Relay ?? RelayOptions.CreateDefault();
+            if (DevMode.IsDev) DevMode.ApplyDevRelayDefaults(opts, fresh.Warnings);
+            var relay = new RelayManager(fresh, opts, initialized: fresh.Relay != null);
+            var warnings = new List<string>();
+            if (fresh.Relay is { Enabled: true })
+            {
+                relay.Start(warnings);
+                if (!relay.Running) ProbeDelegatedAfterStartFailure();
+            }
+            var old = _relay;
+            _relay = relay;
+            old?.Dispose();
+            if (warnings.Count > 0)
+            {
+                _form.SetWarnings(fresh.Warnings.Concat(warnings).ToList());
+            }
+        }
+        catch
+        {
+            /* 重载失败：保持未委托现状，下一刷新周期重试 */
+        }
+        RefreshAutostartState();
+    }
+
+    /// <summary>S4 补探活：relay 本地启动失败后探测一次既有实例，成功即切委托态（§2.4）。</summary>
+    void ProbeDelegatedAfterStartFailure()
+    {
+        var port = _relay?.Options.Port ?? _cfg.Relay?.Port;
+        if (port is not { } p) return;
+        var st = new DelegatedRelayClient(p).ProbeOnce();
+        if (st is not { Running: true }) return;
+        _delegated = new DelegatedRelayClient(p);
+        _delegatedStatus = st;
+        _delegatedFailures = 0;
+        _form.SetDelegated(true, DelegatedHint());
+        _form.UpdateRelay(st);
+    }
+
+    /// <summary>委托态提示文案（Headless 字段区分「开机后台服务」vs「另一实例」，§2.4 指纹策略）。</summary>
+    string DelegatedHint() =>
+        _delegatedStatus is { Headless: true }
+            ? "中转由开机后台服务运行（只读）；启停请用管理面板或注销自启动。"
+            : "中转由另一运行实例承载（只读）；启停请用管理面板。";
+
+    /// <summary>注册流：/Run 拉起后 ≤10s 探活为唯一成败判据（R2-F2），成功切委托态。</summary>
+    async Task<bool> WaitHeadlessHealthyAsync(TimeSpan limit)
+    {
+        var port = _cfg.Relay?.Port;
+        if (port == null) return false;
+        var client = new DelegatedRelayClient(port.Value);
+        var deadline = Environment.TickCount64 + (long)limit.TotalMilliseconds;
+        while (Environment.TickCount64 < deadline)
+        {
+            var st = await client.ProbeAsync().ConfigureAwait(true);
+            if (st is { Running: true, Headless: true })
+            {
+                _delegated = client;
+                _delegatedStatus = st;
+                _delegatedFailures = 0;
+                _form.SetDelegated(true, DelegatedHint());
+                _form.UpdateRelay(st);
+                return true;
+            }
+            await Task.Delay(500).ConfigureAwait(true);
+        }
+        return false;
     }
 
     void Apply(UsageSnapshot s)
@@ -208,7 +599,8 @@ sealed class AppContext : ApplicationContext
                 TaskbarProgress.Clear(_form.Handle);
             }
             _form.UpdateData(s);
-            _form.UpdateRelay(_relay?.Snapshot()); // 三态快照：运行/显式关闭/未初始化均由 DetailForm 渲染
+            // 委托态渲染远端快照（渲染代码零改动，§2.4）；非委托态走本地三态快照
+            _form.UpdateRelay(_delegated != null ? _delegatedStatus : _relay?.Snapshot());
         }
         catch (Exception ex)
         {
@@ -232,19 +624,43 @@ sealed class AppContext : ApplicationContext
         }
     }
 
-    /// <summary>托盘悬停的"中转"行；仅中转运行时显示，其余状态（未初始化/显式关闭）与旧版无 relay 行为一致。</summary>
+    /// <summary>托盘悬停的"中转"行；仅中转运行时显示，其余状态（未初始化/显式关闭）与旧版无 relay 行为一致。
+    /// 委托态：远端快照简化一行（渠道数与 current；§2.4 可选项按简化实现）。</summary>
     string? RelayLine()
     {
+        if (_delegated != null)
+        {
+            var st = _delegatedStatus;
+            if (st is not { Running: true }) return null;
+            var by = st.Headless ? "开机后台服务" : "另一实例";
+            var cur = st.CurrentId != null ? $"{st.CurrentId} · {st.Providers.Count} 渠道" : "无可用渠道";
+            return $"中转  {cur}（{by}）";
+        }
         if (_relay is not { Running: true } r) return null;
         return r.PreviewLine();
     }
 
     /// <summary>
     /// 用系统默认浏览器打开中转管理面板；中转未运行时给出提示（消除静默无反应）。
+    /// 委托态分流（R1-F2）：绕过本地 Running 守卫——委托远端与 UI 同读一份配置文件，
+    /// 从 relay.port 推导的 URL 指向 headless，全功能管理天然可用。详情窗按钮 / 托盘菜单 /
+    /// 缺 key 引导按钮三入口共用此分流（§2.4）。
     /// </summary>
     void OpenAdminPanel(string? url = null)
     {
-        if (_relay is not { Running: true } r)
+        var target = url;
+        if (target == null)
+        {
+            if (_relay is { Running: true } r)
+            {
+                target = r.AdminUrl;
+            }
+            else if (_delegated != null)
+            {
+                target = $"http://127.0.0.1:{_delegated.Port}/admin"; // 委托远端面板（R1-F2）
+            }
+        }
+        if (target == null)
         {
             try
             {
@@ -257,7 +673,6 @@ sealed class AppContext : ApplicationContext
             }
             return;
         }
-        var target = url ?? r.AdminUrl;
         try
         {
             Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
@@ -304,6 +719,7 @@ sealed class AppContext : ApplicationContext
         {
             _relay?.Dispose(); // 先停中转监听，再释放 UI 资源
             _timer.Dispose();
+            _trimTimer?.Dispose();
             _client.Dispose();
             // 托盘图标必须先隐藏再释放，避免残留幽灵图标
             _tray.Visible = false;

@@ -10,6 +10,7 @@
 - **系统托盘同步图标**（右下角）：同样的动态数字，左键打开详情，右键菜单（打开详情 / 立即刷新 / 退出）
 - **托盘悬停多行摘要浮窗**：周 / 5h / 活跃度（累计·今日·连续）/ 更新时间一屏尽览，鼠标移开自动消失
 - 点击图标弹出**详情窗口**：5h 积分 / 周积分 / MCP 月度进度条与重置时间、24h tokens、分模型明细、活跃度（累计 / 今日 / 连续天数 / 近 14 天用量柱状图）
+- **模型中转（relay）**：本机 OpenAI 兼容中转，支持**开机后台服务**（`--headless`，无需登录即可转发）、**登录前运行**、UI 委托态只读展示与自启动分组（详情窗内注册/注销，见下文）
 - 关闭窗口 = 最小化常驻，退出走窗口内"退出"按钮或托盘菜单；重复启动会恢复已有窗口（单实例）
 
 > 原理：任务栏按钮显示的是运行中窗口的当前图标（`WM_SETICON`），运行期间可随时更换；"固定到任务栏"仅保留槽位，动态数据需程序保持运行。
@@ -183,9 +184,10 @@ opencode (localrelay provider) ──http://127.0.0.1:8787/v1──▶ GlmBalanc
 | `POST /v1/chat/completions` | Bearer localToken | OpenAI 兼容转发（请求体原样透传，不重序列化） |
 | `GET /v1/models` | Bearer localToken | 池内 Enabled 渠道 models 并集（OpenAI 格式） |
 | `GET /health` | 免 | `{"status":"ok"}` |
-| `GET /status` | 免（仅本机回环） | 渠道状态 JSON（state/lastError/lastUsed/冷却剩余/计数/用量%（remainingPct=较小窗口值，另含 fiveHourPct / weekPct 分窗口值）+ current） |
+| `GET /status` | 免（仅本机回环） | 渠道状态 JSON（state/lastError/lastUsed/冷却剩余/计数/用量%（remainingPct=较小窗口值，另含 fiveHourPct / weekPct 分窗口值）+ current；`--headless` 进程另含 `headless: true`，旧消费者零感知） |
 | `GET /admin` | 免 | 管理面板（五 Tab：总览 / Provider 池 / 日志 / 部署 / 设置） |
 | `/api/*` | Bearer localToken | 管理 JSON API（provider CRUD / move / test / import、agents deploy、settings、logs；key 只写不读，响应一律掩码） |
+| `POST /api/shutdown` | Bearer localToken | **仅 `--headless` 进程生效**：停止 relay 并退出进程（注销流兜底）；`localToken` 为空（免鉴权故障态）或 Host 头非 `127.0.0.1:<port>` 时 403 拒绝 |
 
 ### 强制通道与拖拽调序（API 用法）
 
@@ -235,11 +237,58 @@ ESC 取消回滚）；总览顶部横幅在强制通道不可用时给出原因�
 3. 验证：`opencode run -m localrelay/glm-5.3-flash "回复ok两个字"`。
 4. 重置 localToken（设置 Tab）后必须**同步重新部署** opencode 端，否则请求 401。
 
+### 开机后台服务（headless，无需登录）
+
+同一个 exe 以 `--headless` 参数运行时作为**纯后台进程**承载中转（RelayServer + 探测 + 管理 API），不加载任何 UI 组件、不建托盘/窗口；登录后启动的界面程序会自动探测到它并进入**委托态**（只读展示中转状态，启停经管理面板），两者可独立或同时运行。
+
+```sh
+# 手工启动（诊断用；relay 关闭态/无 relay 段时直接退出、不占端口）
+GlmBalanceTaskbar.exe --headless --config-dir "C:\Users\<用户名>"
+```
+
+`--config-dir` 指定**用户 profile 根**（key 链 home 重定向）：SYSTEM 账户（开机任务）下凭它解析 `~/.local/share/opencode/auth.json` 等 key 读取链，且**跟随 key 轮换**（重启 headless 即生效，不冻结）。缺省时退回当前账户 profile。配置文件本体仍为 exe 同目录 `glmbalance-taskbar.json`（UI 与 headless 共读共享同一份）。
+
+推荐通过**详情窗「自启动」分组**注册/注销，而不是手工 schtasks：
+
+| 元素 | 说明 |
+| --- | --- |
+| 状态行 | 四态：未注册 / 已注册 · 后台服务运行中（委托）/ 已注册 · 由本程序承载（下次开机交接）/ 已注册 · 后台服务未运行 |
+| 注册开机服务（无需登录） | 弹 UAC 确认 → 注册计划任务 `GlmBalanceTaskbarRelay`（`schtasks /SC ONSTART /RU SYSTEM`）→ **立即拉起 headless**（无需等重启）；注册前本地中转会短暂让位给后台服务，注册失败自动回滚由本程序承载 |
+| 注销开机服务 | 停运行中的后台进程（含 `/api/shutdown` 兜底）→ 删除计划任务 |
+| 登录时启动（仅界面） | HKCU Run 键副开关，零提权；与主开关正交（可只开其一） |
+
+对应提权子命令（注册弹窗失败时也给手动命令）：`--task-register` / `--task-unregister`。dev 实例（`--dev`）硬禁以上全部参数与自启动分组。
+
+headless 进程行为要点：
+
+- 单实例互斥体 `Local\GlmBalanceTaskbar.Headless`（与 UI 互斥体互不相干）；二次启动静默退出
+- relay 关闭态 / 无 `relay` 段 → **exit 0 不监听端口**（绝不挡住 UI 的中转）
+- 启动失败（端口被占等）→ 写 `%TEMP%\glmbalance-headless-crash.log` 后 exit 1
+- 每尺寸图标渲染去重 + ICO 字节缓存 + GC `System.GC.ConserveMemory=5` + 定时工作集裁剪（基线显著低于 UI 进程）
+- 不做优雅停机：Windows 关机直接终止进程（in-flight 请求丢弃，与断电语义一致）
+
+已知限制（SYSTEM 账户环境）：
+
+- **开机早期时钟未同步**（W32Time）：出站 TLS 证书时间校验失败 → 探测/转发全失败，时间同步后自愈；症状与下一条同形，一并排查
+- **用户级代理不可见**：headless 只取机器级代理配置；代理强依赖网络时建议用机器级 `HTTPS_PROXY` 环境变量或退回「登录时启动」
+- 用户目录不可读（EFS 加密 / 显式 Deny ACL）：key 链落空 → `zhipu-coding` 渠道 `no-key`（详情窗引导行可见）；显式填 key 的渠道不受影响
+
+### 故障排查（自启动 / 委托态）
+
+| 现象 | 处理 |
+| --- | --- |
+| 注册弹窗后「后台服务未启动，将在下次开机生效」 | headless 立即退出（多为端口被第三方占用）：查 `%TEMP%\glmbalance-headless-crash.log`；释放端口后重新注册（`/F` 覆盖式，随时可重注册） |
+| 详情窗显示「已注册 · 后台服务未运行」 | 开机任务未运行（exe 被移动/升级后任务指向旧路径也会如此）：重新点一次「注册开机服务」覆盖 `/TR` 路径即可 |
+| 委托态下 UI 中转开关不可点（只读） | 属预期：中转由后台服务承载；启停请用管理面板或注销自启动 |
+| 手工清理孤儿任务 | `schtasks /Delete /TN GlmBalanceTaskbarRelay /F`（exe 已删除时的残留任务无害，开机仅任务计划程序报错） |
+| 与旧版 shell:startup 快捷方式共存 | 建议移除手工快捷方式，改用「自启动」分组（避免双实例双 relay） |
+
 ### 故障排查
 
 | 现象 | 处理 |
 | --- | --- |
 | 详情窗提示"中转服务启动失败（端口 8787）" | 端口被占用：改 `relay.port` 或释放占用进程；配额显示不受影响 |
+| UI 启动后中转开关显示"只读"并提示由后台服务运行 | UI 处于委托态（探测到 headless/另一实例在承载中转）：启停请用管理面板，或注销自启动后由 UI 本地承载 |
 | 请求 401 invalid_api_key | localToken 与 opencode 端 localrelay apiKey 不一致：重新部署或同步 token |
 | `502 中转失败：所有可用渠道均失败` | 打开 `/status` 看各渠道 lastError；常为上游 key 失效或全部冷却 |
 | 渠道一直 normal 但请求 429 | 该渠道 probe=`none`（不可检查）：属预期，反应式兜底会在首个 429 后进冷却 |
@@ -281,6 +330,9 @@ GlmBalanceTaskbar.exe --dev --relay-init <dir>
 
 # 图标诊断（与 mock/配置无关，行为同现状）
 GlmBalanceTaskbar.exe --dev --dump-icon
+
+# 以下组合被硬禁（dev 实例禁止运行/注册系统任务），一律报错 exit≠0：
+#   --dev --headless、--dev --task-register、--dev --task-unregister
 ```
 
 dev 配置文件可在生产格式基础上增加顶层 `devMock` 段编程假上游行为（生产实例解析时忽略该键）：

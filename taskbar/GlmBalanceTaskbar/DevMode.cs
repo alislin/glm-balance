@@ -11,6 +11,9 @@ public static class DevMode
     /// <summary>dev 模式判定（Main 最早解析，仅一次；--dev 精确匹配，OrdinalIgnoreCase，与既有参数同风格）。</summary>
     public static bool IsDev { get; private set; }
 
+    /// <summary>headless 模式判定（--headless：开机后台中转进程；dev 下与 --task-* 一并硬禁，入口分派拦截）。</summary>
+    public static bool IsHeadless { get; private set; }
+
     /// <summary>生产默认 relay 端口（dev 实例硬禁监听）。</summary>
     public const int ProductionRelayPort = 8787;
     /// <summary>dev 实例 relay 默认监听端口（dev 配置可显式覆盖其它端口；显式写 8787 由 Start() 硬禁拦截）。</summary>
@@ -40,6 +43,9 @@ public static class DevMode
         ? "AlisL.GlmBalanceTaskbar.Dev"
         : "AlisL.GlmBalanceTaskbar";
 
+    /// <summary>headless 单实例互斥体（§2.2：与 UI 互斥体互不相干，二者可共存；dev 硬禁 headless，无 dev 变体）。</summary>
+    public static string HeadlessMutexName => @"Local\GlmBalanceTaskbar.Headless";
+
     /// <summary>mock 上游端口（dev 配置 devMock.upstreamPort 可经 SetMockUpstreamPort 覆盖；默认 8789）。
     /// 必须在首次建池/启动 mock 之前合成，此后建池覆写与自环校验共用。</summary>
     public static int MockUpstreamPort { get; private set; } = DefaultMockUpstreamPort;
@@ -64,6 +70,7 @@ public static class DevMode
         if (_initialized) return;
         _initialized = true;
         IsDev = args.Any(a => a.Equals("--dev", StringComparison.OrdinalIgnoreCase));
+        IsHeadless = args.Any(a => a.Equals("--headless", StringComparison.OrdinalIgnoreCase));
     }
 
     public static void SetMockUpstreamPort(int port)

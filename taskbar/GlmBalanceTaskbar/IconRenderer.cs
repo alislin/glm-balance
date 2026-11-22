@@ -33,19 +33,73 @@ public static class Colors
 /// <summary>
 /// 把短文本（如 "36"）渲染成多分辨率 Icon：对 16/20/24/32/48 每个尺寸独立渲染文字帧
 /// （自适应字号 + 按尺寸缩放的黑描边），避免单帧图标被系统最近邻缩放吞掉笔画。
+/// 内存优化（M2/M3/M4）：每尺寸仅渲染一次（头/身共用）；(text,color) → ICO 字节 LRU 缓存
+/// （数值/颜色不变的连续刷新跳过全部渲染）；FontFamily/StringFormat 静态复用。
+/// 缓存命中也必须返回新 Icon 实例（SetIcon 会 Dispose 旧实例，返回缓存实例 = 复用已释放对象）。
 /// </summary>
 public static class IconRenderer
 {
     /// <summary>ICO 各帧尺寸：标题栏 16、任务栏 24/32、Alt-Tab/大图标 48。</summary>
     static readonly int[] FrameSizes = { 16, 20, 24, 32, 48 };
 
+    /// <summary>ICO 字节缓存条目上限（LRU；约 30–60KB）。</summary>
+    const int CacheCapacity = 3;
+
+    static readonly object CacheGate = new();
+    static readonly List<(string Text, int ColorArgb, byte[] Ico)> Cache = new();
+
+    /// <summary>M4：字体族与居中 StringFormat 静态复用（每帧省 1 FontFamily + 1 Clone；只读共享）。</summary>
+    static readonly FontFamily SegoeFamily = new("Segoe UI");
+    static readonly StringFormat CenterFormat = CreateCenterFormat();
+
+    static StringFormat CreateCenterFormat()
+    {
+        var fmt = (StringFormat)StringFormat.GenericDefault.Clone();
+        fmt.Alignment = StringAlignment.Center;
+        fmt.LineAlignment = StringAlignment.Center;
+        return fmt;
+    }
+
     [DllImport("user32.dll")]
     private static extern bool DestroyIcon(IntPtr hIcon);
 
-    /// <summary>渲染多分辨率文字图标。</summary>
+    /// <summary>渲染多分辨率文字图标（带 (text,color) → ICO 字节 LRU 缓存；每次返回新 Icon 实例）。</summary>
     public static Icon RenderTextIcon(string text, Color color)
     {
-        byte[] ico;
+        var argb = color.ToArgb();
+        byte[]? ico = null;
+        lock (CacheGate)
+        {
+            var idx = Cache.FindIndex(e => e.Text == text && e.ColorArgb == argb);
+            if (idx >= 0)
+            {
+                var hit = Cache[idx];
+                Cache.RemoveAt(idx);
+                Cache.Add(hit); // LRU 提升
+                ico = hit.Ico;
+            }
+        }
+        if (ico == null)
+        {
+            ico = RenderIcoBytes(text, color);
+            lock (CacheGate)
+            {
+                Cache.Add((text, argb, ico));
+                if (Cache.Count > CacheCapacity) Cache.RemoveAt(0);
+            }
+        }
+        // 缓存命中也必须新建 Icon：AppContext.SetIcon 会 Dispose 旧实例（实现红线，M3）
+        return new Icon(new MemoryStream(ico));
+    }
+
+    /// <summary>渲染多分辨率 ICO 字节（M2：每尺寸渲染一次存列表，头/身共用——10 次渲染 → 5 次）。</summary>
+    static byte[] RenderIcoBytes(string text, Color color)
+    {
+        var pngs = new byte[FrameSizes.Length][];
+        for (var i = 0; i < FrameSizes.Length; i++)
+        {
+            pngs[i] = RenderPng(text, color, FrameSizes[i]);
+        }
         using (var ms = new MemoryStream())
         {
             using var w = new BinaryWriter(ms);
@@ -54,27 +108,26 @@ public static class IconRenderer
             w.Write((ushort)FrameSizes.Length); // frame count
 
             int offset = 6 + 16 * FrameSizes.Length;
-            foreach (var size in FrameSizes)
+            for (var i = 0; i < FrameSizes.Length; i++)
             {
-                var png = RenderPng(text, color, size);
+                var size = FrameSizes[i];
                 w.Write((byte)(size >= 256 ? 0 : size)); // width
                 w.Write((byte)(size >= 256 ? 0 : size)); // height
                 w.Write((byte)0);   // palette
                 w.Write((byte)0);   // reserved
                 w.Write((ushort)1); // planes
                 w.Write((ushort)32);// bpp
-                w.Write((uint)png.Length);
+                w.Write((uint)pngs[i].Length);
                 w.Write((uint)offset);
-                offset += png.Length;
+                offset += pngs[i].Length;
             }
-            foreach (var size in FrameSizes)
+            foreach (var png in pngs)
             {
-                w.Write(RenderPng(text, color, size));
+                w.Write(png);
             }
             w.Flush();
-            ico = ms.ToArray();
+            return ms.ToArray();
         }
-        return new Icon(new MemoryStream(ico));
     }
 
     /// <summary>诊断：把每个尺寸的渲染帧 PNG 直接写到目录（不经 ICO 打包，用于排查渲染内容）。</summary>
@@ -97,10 +150,8 @@ public static class IconRenderer
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
 
-        using var family = new FontFamily("Segoe UI");
-        var fmt = (StringFormat)StringFormat.GenericDefault.Clone();
-        fmt.Alignment = StringAlignment.Center;
-        fmt.LineAlignment = StringAlignment.Center;
+        var family = SegoeFamily; // M4：静态复用（只读共享，不可 Dispose）
+        var fmt = CenterFormat;   // M4：静态复用（只读共享，不可 Dispose）
 
         // 字号自适应：从大往小缩，直到 MeasureString 完全放进画布
         var em = size * 0.80f;

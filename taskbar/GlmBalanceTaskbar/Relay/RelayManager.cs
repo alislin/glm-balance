@@ -416,7 +416,8 @@ public sealed class RelayManager : IDisposable
             _authDisabled, false,
             providers, _router.ModelUnion(),
             Dev: DevMode.IsDev,
-            Forced: BuildForcedStatus(now));
+            Forced: BuildForcedStatus(now),
+            Headless: DevMode.IsHeadless); // §2.4：模式注入（false → 序列化省略，/status 形状向后兼容）
     }
 
     /// <summary>
