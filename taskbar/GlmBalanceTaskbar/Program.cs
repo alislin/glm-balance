@@ -76,7 +76,7 @@ static class Program
                 return 1;
             }
             if (DevMode.IsHeadless) return HeadlessRunner.Run(args);
-            return taskCmd == "--task-register" ? ScheduledTask.RunRegisterCommand() : ScheduledTask.RunUnregisterCommand();
+            return taskCmd == "--task-register" ? ScheduledTask.RunRegisterCommand(args) : ScheduledTask.RunUnregisterCommand();
         }
 
         return RunUi();

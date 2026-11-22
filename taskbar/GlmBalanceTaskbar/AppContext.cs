@@ -13,7 +13,7 @@ sealed class AppContext : ApplicationContext
     /// <summary>活跃度刷新间隔（毫秒），与插件 ACTIVITY_TTL 一致。</summary>
     const int ActivityTtlMs = 300_000;
 
-    readonly AppConfig _cfg;
+    AppConfig _cfg; // 非 readonly：S5 回退重载配置后同步更新（A-F1，后续探活/SetWarnings 用新端口与新快照）
     readonly GlmApiClient _client;
     readonly DetailForm _form;
     readonly NotifyIcon _tray;
@@ -220,16 +220,19 @@ sealed class AppContext : ApplicationContext
             try { _relay.Stop(); } catch { /* ignore */ }
         }
 
-        // 步骤 1–2：自体提权子命令（同一 exe --task-register；管理员上下文内 /Create → /Run）
+        // 步骤 1–2：自体提权子命令（同一 exe --task-register；管理员上下文内 /Create → /Run）。
+        // --config-dir 由本 UI 进程显式传参（A-F5：over-the-shoulder UAC 下提权子进程的
+        // UserProfile ≠ 交互用户 profile，home 推导必须收敛到 UI 进程，「谁推导谁传参」）。
         var elevateError = (string?)null;
         try
         {
             var exe = Environment.ProcessPath ?? Environment.GetCommandLineArgs()[0];
+            var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             using var p = Process.Start(new ProcessStartInfo(exe)
             {
                 Verb = "runas",
                 UseShellExecute = true,
-                Arguments = "--task-register",
+                Arguments = "--task-register --config-dir \"" + profile + "\"",
             });
             p?.WaitForExit();
         }
@@ -307,9 +310,19 @@ sealed class AppContext : ApplicationContext
             "注销开机服务", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
-    /// <summary>注册失败回滚：本地 Start 恢复承载（enabled 语义未动，零写盘）。</summary>
+    /// <summary>注册失败回滚：本地 Start 恢复承载（enabled 语义未动，零写盘）。
+    /// 回滚路径必须同步清理委托态（C-F1）：否则本地 relay 已由本程序承载、UI 仍只读渲染陈旧
+    /// 远端快照，下一周期回退还会级联「自我委托」——探活命中自己刚启动的 relay，只读自锁。</summary>
     void RollbackLocalRelay()
     {
+        // 清委托态（幂等）：委托对象/快照/失败计数全部复位，开关与 pin 菜单恢复可用
+        if (_delegated != null)
+        {
+            _delegated = null;
+            _delegatedStatus = null;
+            _delegatedFailures = 0;
+            _form.SetDelegated(false, null);
+        }
         try
         {
             var warnings = new List<string>();
@@ -424,7 +437,7 @@ sealed class AppContext : ApplicationContext
             _form.SetWarnings(_cfg.Warnings.Concat(warnings).ToList());
             _form.UpdateRelay(relay.Snapshot());
             // 非委托态在 relay 操作失败（本地 Start 端口被占等）后补探活一次，成功即切委托态（§2.4，S4）
-            if (!relay.Running && enable) ProbeDelegatedAfterStartFailure();
+            if (!relay.Running && enable) ProbeDelegatedAfterStartFailure(relay.Options.Port);
         }
         finally
         {
@@ -466,7 +479,9 @@ sealed class AppContext : ApplicationContext
 
     // ─────────────────────────── 委托态（G3/§2.4/§5 S1·S4·S5） ───────────────────────────
 
-    /// <summary>委托态 30s 节流刷新：拉取远端 /status；连续失败 N 次回退本地承载（S5）。</summary>
+    /// <summary>委托态 30s 节流刷新：拉取远端 /status；连续失败 N 次回退本地承载（S5）。
+    /// 失败窗口内更新 hint 提示失联（C-F2/A-F8：保持上次快照 + 状态行提示的 S5 前半句落地），
+    /// 成功即恢复常规委托文案。</summary>
     async Task RefreshDelegatedStatusAsync()
     {
         var st = await _delegated!.FetchStatusAsync().ConfigureAwait(true);
@@ -474,20 +489,27 @@ sealed class AppContext : ApplicationContext
         {
             _delegatedStatus = st;
             _delegatedFailures = 0;
+            _form.SetDelegated(true, DelegatedHint()); // 失联提示复位为常规委托文案
             return;
         }
         _delegatedFailures++;
         if (_delegatedFailures >= DelegatedFailureLimit)
         {
             FallBackToLocal();
+            return;
         }
+        // 一次性失败：保持上次快照 + hint 追加失联提示（下一周期自愈则自动复位）
+        _form.SetDelegated(true,
+            DelegatedHint() + $"（后台服务暂未响应，第 {_delegatedFailures}/{DelegatedFailureLimit} 次）");
     }
 
     /// <summary>
     /// S5 回退：委托对象连续失联后回退「未委托」。先 AppConfig.Load 重载并以新配置重建
     /// RelayManager 再本地 Start（R1-F8：委托期间 admin 面板对 providers/port/参数的变更不在
     /// 构造期 _opts 中，不重载会用过时池启动；UI 委托态全程零写盘，重载零副作用）。
-    /// Start 失败（headless 恰在重启等）→ S4 补探活，成功即切回委托态。
+    /// 同步更新 _cfg（A-F1：后续探活/SetWarnings 以新配置为准，否则读到旧端口旧快照）。
+    /// Start 失败（headless 恰在重启，或 admin 已把 relay.port 迁移且 headless 在新端口承载，
+    /// A-F2）→ S4 补探活**新配置端口**，命中即重新切委托态（端口迁移自愈，不滞留）。
     /// </summary>
     void FallBackToLocal()
     {
@@ -506,10 +528,11 @@ sealed class AppContext : ApplicationContext
             if (fresh.Relay is { Enabled: true })
             {
                 relay.Start(warnings);
-                if (!relay.Running) ProbeDelegatedAfterStartFailure();
+                if (!relay.Running) ProbeDelegatedAfterStartFailure(relay.Options.Port); // A-F2：新端口重委托
             }
             var old = _relay;
             _relay = relay;
+            _cfg = fresh; // A-F1：回退后全局同步新配置（旧引用仅 _client 持有，轮询语义不变）
             old?.Dispose();
             if (warnings.Count > 0)
             {
@@ -523,14 +546,18 @@ sealed class AppContext : ApplicationContext
         RefreshAutostartState();
     }
 
-    /// <summary>S4 补探活：relay 本地启动失败后探测一次既有实例，成功即切委托态（§2.4）。</summary>
-    void ProbeDelegatedAfterStartFailure()
+    /// <summary>
+    /// S4 补探活：relay 本地启动失败后探测一次既有实例，成功即切委托态（§2.4）。
+    /// 端口由调用方显式传入（A-F1：此刻 _relay/_cfg 可能仍是旧值，读字段会探错目标）。
+    /// 自体防护（C-F1②）：本进程 relay 仍在 Running 时绝不委托——此时探活命中的必是
+    /// 自己的 relay，切委托态会导致 UI 只读自锁、无法经 UI 停止中转。
+    /// </summary>
+    void ProbeDelegatedAfterStartFailure(int port)
     {
-        var port = _relay?.Options.Port ?? _cfg.Relay?.Port;
-        if (port is not { } p) return;
-        var st = new DelegatedRelayClient(p).ProbeOnce();
+        if (_relay is { Running: true }) return; // C-F1②：探活目标=自身时禁止自我委托
+        var st = new DelegatedRelayClient(port).ProbeOnce();
         if (st is not { Running: true }) return;
-        _delegated = new DelegatedRelayClient(p);
+        _delegated = new DelegatedRelayClient(port);
         _delegatedStatus = st;
         _delegatedFailures = 0;
         _form.SetDelegated(true, DelegatedHint());

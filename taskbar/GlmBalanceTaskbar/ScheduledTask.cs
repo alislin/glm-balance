@@ -74,13 +74,6 @@ static class ScheduledTask
     /// <summary>/End 停任务引擎启动的运行中实例（任务粒度终止；不误杀同镜像名的 UI 实例，§2.5）。</summary>
     public static bool EndTask() => RunSchtasks($"/End /TN \"{TaskName}\"").Code == 0;
 
-    public static bool DeleteTask()
-    {
-        var (code, output) = RunSchtasks($"/Delete /TN \"{TaskName}\" /F");
-        // 已不存在的任务按删除成功处理（幂等清理）
-        return code == 0 || output.Contains("不存在", StringComparison.Ordinal);
-    }
-
     // ─────────────────────────── HKCU Run（登录时启动副开关） ───────────────────────────
 
     /// <summary>HKCU Run 键是否已写（副开关勾选态）。读取失败返回 false（勾选态按未注册呈现）。</summary>
@@ -118,11 +111,16 @@ static class ScheduledTask
     /// <summary>
     /// --task-register：/Create 成功后 /Run 立即拉起（R1-F7）；/Run 失败不阻塞注册结果
     /// （弹窗注明「将在下次开机生效」）。结果经 MessageBox 报告后退出。
+    /// <paramref name="args"/> 中的 --config-dir 由父 UI 进程显式传入（A-F5：over-the-shoulder
+    /// UAC 下提权子进程的 UserProfile ≠ 交互用户 profile）；缺省退回当前进程 profile（手工诊断）。
     /// 退出码：0 = 注册成功（含 /Run 失败分支），1 = /Create 失败。
     /// </summary>
-    public static int RunRegisterCommand()
+    public static int RunRegisterCommand(string[] args)
     {
-        var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var dirIdx = Array.FindIndex(args, a => a.Equals("--config-dir", StringComparison.OrdinalIgnoreCase));
+        var profile = dirIdx >= 0 && dirIdx + 1 < args.Length && args[dirIdx + 1].Length > 0
+            ? args[dirIdx + 1]
+            : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var ok = Register(profile, out var error);
         if (!ok)
         {
@@ -152,8 +150,10 @@ static class ScheduledTask
         EndTask();          // 失败不阻塞（任务可能未在运行）
         ShutdownRunningHeadless(notes); // /api/shutdown 兜底（手工启动的诊断用 headless 不受 /End 管辖）
         var (code, output) = RunSchtasks($"/Delete /TN \"{TaskName}\" /F");
-        if (code != 0)
+        if (code != 0 && Exists())
         {
+            // C-F3：/Delete 失败且任务确实仍在（非「任务已被外部删除」场景）→ 报错；
+            // 已不存在则按注销成功处理（幂等清理，与设计 §7 R7 一致）
             MessageBox.Show(
                 "注销失败：" + (output.Length > 0 ? output : "schtasks 返回非零退出码") +
                 $"\n\n可手动执行：schtasks /Delete /TN \"{TaskName}\" /F",

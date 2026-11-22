@@ -497,16 +497,7 @@ public sealed class AdminApi
             await WriteAsync(rsp, 403, "{\"error\":\"forbidden:bad_host\"}").ConfigureAwait(false);
             return;
         }
-        var auth = req.Headers["Authorization"] ?? "";
-        if (!auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
-        {
-            await WriteAsync(rsp, 401, "{\"error\":\"unauthorized\"}").ConfigureAwait(false);
-            return;
-        }
-        var presented = auth["Bearer ".Length..].Trim();
-        var ok = System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
-            Encoding.UTF8.GetBytes(presented), Encoding.UTF8.GetBytes(token));
-        if (!ok)
+        if (!RelayAuth.IsAuthorized(req, token))
         {
             await WriteAsync(rsp, 401, "{\"error\":\"unauthorized\"}").ConfigureAwait(false);
             return;

@@ -26,12 +26,19 @@ static class HeadlessRunner
             HomeOverride.Set(args[dirIdx + 1]);
         }
 
-        // 单实例互斥体（与 UI 互斥体互不相干，二者可共存；二次 --headless 静默 exit 0）
-        using var mutex = new Mutex(true, DevMode.HeadlessMutexName, out var createdNew);
-        if (!createdNew) return 0;
+        // 零 WinForms 哨兵（A-F3）：运行时自检——若 Main 分派或本路径被后续改动引入了
+        // WinForms 可达类型引用，程序集已被 JIT 类型解析加载，此处必然查到并写崩溃日志报警。
+        // 纯查询 GetAssemblies 不触发加载；PublishSingleFile 下 Modules 锚点弱化（托管程序集
+        // 从 bundle 内存加载），此哨兵跨发布形态可复现，替代注释纪律成为结构性守护。
+        SentinelCheckLoadedWinForms();
 
         try
         {
+            // 单实例互斥体（与 UI 互斥体互不相干，二者可共存；二次 --headless 静默 exit 0）。
+            // 在 try 块内创建（A-F9）：构造异常（ACL/会话边界）也走崩溃日志，不留无日志退出。
+            using var mutex = new Mutex(true, DevMode.HeadlessMutexName, out var createdNew);
+            if (!createdNew) return 0;
+
             var cfg = AppConfig.Load(null); // 配置文件本体恒为 exe 同目录（§2.3：不因 --config-dir 改变）
             if (cfg.Relay is not { Enabled: true })
             {
@@ -61,6 +68,33 @@ static class HeadlessRunner
         {
             CrashLog(ex.ToString());
             return 1;
+        }
+    }
+
+    /// <summary>
+    /// 零 WinForms 前提的运行时哨兵（A-F3，R1-F3/A2 的进程内守护）：发现
+    /// System.Windows.Forms 程序集已被加载即写崩溃日志报警（功能不受影响，仅 M1 内存基线
+    /// 收益落空——治本需回查 Main 分派与 headless 路径的类型图）。查询失败不影响主流程。
+    /// </summary>
+    static void SentinelCheckLoadedWinForms()
+    {
+        try
+        {
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var name = asm.GetName().Name;
+                if (name != null && name.StartsWith("System.Windows.Forms", StringComparison.Ordinal))
+                {
+                    CrashLog("[sentinel] headless 进程检测到 WinForms 程序集已加载：" + name +
+                             "。零 WinForms 前提被破坏（Main 分派或 headless 路径新增了可达的 WinForms 类型引用），" +
+                             "M1 内存收益已落空；relay 功能不受影响，请走查 Program.Main 与 HeadlessRunner 的类型图。");
+                    return;
+                }
+            }
+        }
+        catch
+        {
+            /* 自检失败不影响主流程 */
         }
     }
 

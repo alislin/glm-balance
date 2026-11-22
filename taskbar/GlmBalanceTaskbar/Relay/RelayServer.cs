@@ -172,11 +172,7 @@ public sealed class RelayServer : IDisposable
     {
         var token = _mgr.EffectiveToken;
         if (token.Length == 0) return true; // 免鉴权模式
-        var auth = req.Headers["Authorization"] ?? "";
-        if (!auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)) return false;
-        var presented = auth["Bearer ".Length..].Trim();
-        return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
-            Encoding.UTF8.GetBytes(presented), Encoding.UTF8.GetBytes(token));
+        return RelayAuth.IsAuthorized(req, token); // A-F7：与 /api/shutdown 共用单一解析实现
     }
 
     string BuildModelsJson()
@@ -651,6 +647,25 @@ public sealed class RelayServer : IDisposable
         public static UpstreamOutcome Server(int status, string? err) => new() { Kind = UpstreamKind.ServerError, StatusCode = status, ErrorText = err };
         public static UpstreamOutcome Network(string err) => new() { Kind = UpstreamKind.NetworkError, ErrorText = err };
         public static UpstreamOutcome Client(int status, string? err, string? contentType) => new() { Kind = UpstreamKind.ClientError, StatusCode = status, ErrorText = err, ContentType = contentType };
+    }
+}
+
+/// <summary>
+/// Bearer 解析共享器（A-F7）：/v1/*（RelayServer.Authorize，空 token 放行 fail-open）与
+/// /api/shutdown（AdminApi，空 token 403 fail-closed）共用同一前缀解析 + FixedTimeEquals
+/// 实现；空 token 策略差异由调用方决定，防止两处逐字节重写未来漂移。
+/// </summary>
+internal static class RelayAuth
+{
+    /// <summary>Authorization 头为合法 Bearer 且与 expected 常量时间匹配 → true；
+    /// 头缺失 / 非 Bearer 格式 / 不匹配 → false。</summary>
+    public static bool IsAuthorized(System.Net.HttpListenerRequest req, string expected)
+    {
+        var auth = req.Headers["Authorization"] ?? "";
+        if (!auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)) return false;
+        var presented = auth["Bearer ".Length..].Trim();
+        return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+            System.Text.Encoding.UTF8.GetBytes(presented), System.Text.Encoding.UTF8.GetBytes(expected));
     }
 }
 
