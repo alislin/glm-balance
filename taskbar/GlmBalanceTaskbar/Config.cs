@@ -83,6 +83,8 @@ public sealed class AppConfig
                                 ChatStatus = (int?)v.Prop("chatStatus").Num() ?? 200,
                                 ModelsStatus = (int?)v.Prop("modelsStatus").Num() ?? 200,
                                 StreamBreak = v.Prop("streamBreak").BoolVal() ?? false,
+                                StreamStallSeconds = (int?)v.Prop("streamStallSeconds").Num() ?? 0,
+                                StreamStallAfterChunks = (int?)v.Prop("streamStallAfterChunks").Num() ?? 0,
                             };
                         }
                     }

@@ -15,7 +15,6 @@ public sealed class RelayServer : IDisposable
 {
     const long MaxBodyBytes = 256L * 1024 * 1024;
     const int ToHeadersTimeoutSec = 120;
-    const int SseIdleTimeoutSec = 120;
 
     readonly RelayManager _mgr;
     readonly AdminApi _admin;
@@ -267,8 +266,16 @@ public sealed class RelayServer : IDisposable
             switch (outcome.Kind)
             {
                 case UpstreamKind.Success:
-                    var ok = await WriteUpstreamResponseAsync(rsp, rt, outcome.Response!, model, chain, sw.ElapsedMilliseconds, ct).ConfigureAwait(false);
-                    if (!ok) { tried.Add(rt.Id); failures.Add($"{rt.Id}(读响应体失败)"); _mgr.CountFailover(); break; }
+                    var wr = await WriteUpstreamResponseAsync(rsp, rt, outcome.Response!, model, chain, sw, ct).ConfigureAwait(false);
+                    if (wr.Failoverable)
+                    {
+                        // 写回前失败（空流/上游读异常）：客户端尚未收到任何字节，可转移。
+                        // 空闲超时不在此列——上游可能只是慢（正常请求），只显式报错，绝不转投。
+                        tried.Add(rt.Id);
+                        failures.Add($"{rt.Id}({wr.Reason})");
+                        _mgr.CountFailover();
+                        break;
+                    }
                     return;
 
                 case UpstreamKind.QuotaFailure: // 429/402/403 → 硬冷却 + 转移
@@ -369,9 +376,13 @@ public sealed class RelayServer : IDisposable
         }
     }
 
-    /// <summary>2xx 写回客户端（SSE 逐块 flush / 普通整块透传）。返回 false = 写出前失败（可转移）。</summary>
-    async Task<bool> WriteUpstreamResponseAsync(HttpListenerResponse rsp, ProviderRuntime rt,
-        HttpResponseMessage res, string model, List<string> chain, long elapsedMs, CancellationToken ct)
+    /// <summary>
+    /// 2xx 写回客户端（SSE 逐块 flush / 普通整块透传）。
+    /// 返回 Failoverable=true = 失败发生在向客户端写出任何字节之前（空流关闭/上游读异常），
+    /// 可交还上层转移；超时类失败不在此列——上游可能只是慢（正常请求），只显式报错绝不转投。
+    /// </summary>
+    async Task<WriteOutcome> WriteUpstreamResponseAsync(HttpListenerResponse rsp, ProviderRuntime rt,
+        HttpResponseMessage res, string model, List<string> chain, System.Diagnostics.Stopwatch sw, CancellationToken ct)
     {
         var contentType = res.Content.Headers.ContentType?.ToString() ?? "application/json";
         var isSse = contentType.Contains("text/event-stream", StringComparison.OrdinalIgnoreCase);
@@ -388,8 +399,8 @@ public sealed class RelayServer : IDisposable
             {
                 res.Dispose();
                 rt.NoteErrorFailure("读响应体失败：" + ex.Message, DateTimeOffset.Now);
-                _mgr.RecordRequest(model, chain, null, elapsedMs, "读响应体失败");
-                return false;
+                _mgr.RecordRequest(model, chain, null, sw.ElapsedMilliseconds, "读响应体失败（转投下一渠道）");
+                return WriteOutcome.Failover("读响应体失败");
             }
             res.Dispose();
             rsp.StatusCode = 200;
@@ -397,16 +408,23 @@ public sealed class RelayServer : IDisposable
             rsp.ContentLength64 = bytes.Length;
             await rsp.OutputStream.WriteAsync(bytes, ct).ConfigureAwait(false);
             rsp.Close();
-            rt.NoteSuccess(elapsedMs);
-            _mgr.RecordRequest(model, chain, 200, elapsedMs, null);
-            return true;
+            rt.NoteSuccess(sw.ElapsedMilliseconds);
+            _mgr.RecordRequest(model, chain, 200, sw.ElapsedMilliseconds, null);
+            return WriteOutcome.Finished();
         }
 
-        // SSE 流式：响应头（含 Content-Type）透传，上游流逐块 copy + flush；idle 120s 无 chunk 才断
+        // SSE 流式：响应头（含 Content-Type）透传，上游流逐块 copy + flush。
+        // 超时分级（配置 relay.stream）：首块未到 600s / 开流后 idle 300s——大 prompt 首块与思考
+        // 间隙属正常慢请求，宁可多等不可误杀；超时不转移，未写回时回 502、已写回时发 SSE 错误帧收尾。
+        var firstChunkSec = _mgr.Options.Stream.FirstChunkSeconds;
+        var idleSec = _mgr.Options.Stream.IdleSeconds;
+
         rsp.StatusCode = 200;
         rsp.ContentType = contentType;
         rsp.SendChunked = true;
         Stream? upstream = null;
+        long copied = 0; // 已向客户端写出的字节数（写前计数：写失败也视为“已接触客户端”）
+        var streamed = System.Diagnostics.Stopwatch.StartNew(); // 流阶段时长（首块等待 + 已流式时间，诊断用）
         try
         {
             upstream = await res.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
@@ -414,42 +432,101 @@ public sealed class RelayServer : IDisposable
             while (true)
             {
                 int n;
+                var timeoutSec = copied == 0 ? firstChunkSec : idleSec;
                 using (var idleCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
                 {
-                    idleCts.CancelAfter(TimeSpan.FromSeconds(SseIdleTimeoutSec));
+                    idleCts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
                     try
                     {
                         n = await upstream.ReadAsync(buf, idleCts.Token).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                     {
-                        // idle 断流：不重试，该渠道错误计数 +1
-                        rt.NoteStreamBroken($"SSE 空闲 {SseIdleTimeoutSec}s 断流", DateTimeOffset.Now);
-                        _mgr.RecordRequest(model, chain, 200, elapsedMs, "SSE 断流（已断开客户端）");
-                        Abort(rsp);
-                        return true;
+                        if (copied == 0)
+                        {
+                            // 首块超时：响应头尚未发给客户端（随首写惰性发送）→ 复位后回结构化 502。
+                            // 不转移：上游可能正在处理大 prompt，转投会误杀正常请求且重复计费。
+                            rt.NoteStreamBroken($"SSE 首块 {timeoutSec}s 未到", DateTimeOffset.Now);
+                            _mgr.RecordRequest(model, chain, 502, sw.ElapsedMilliseconds, $"SSE 首块 {timeoutSec}s 未到");
+                            rsp.SendChunked = false;
+                            await WriteErrorAsync(rsp, 502, $"渠道 {rt.Id} SSE 首块 {timeoutSec}s 未到（上游无输出）",
+                                "relay_upstream_failed", "upstream_no_output").ConfigureAwait(false);
+                            return WriteOutcome.Finished();
+                        }
+                        // 开流后 idle：无法转移。发 SSE 错误帧 + 干净收束（FIN），替代裸 Abort 的 RST
+                        var detail = $"SSE 空闲 {timeoutSec}s 断流（已流式 {streamed.Elapsed.TotalSeconds:F0}s / {copied}B）";
+                        rt.NoteStreamBroken($"SSE 空闲 {timeoutSec}s 断流", DateTimeOffset.Now);
+                        await TryWriteSseErrorFrameAsync(rsp, detail, ct).ConfigureAwait(false);
+                        _mgr.RecordRequest(model, chain, 200, sw.ElapsedMilliseconds, detail + "（已发错误帧收尾）");
+                        return WriteOutcome.Finished();
                     }
                 }
-                if (n == 0) break;
+                if (n == 0)
+                {
+                    if (copied == 0)
+                    {
+                        // 上游干净关闭但零字节（空流）：确定性故障而非慢请求 → 客户端尚无字节，可转移
+                        rt.NoteErrorFailure("上游 SSE 空流关闭（0 字节）", DateTimeOffset.Now);
+                        _mgr.RecordRequest(model, chain, null, sw.ElapsedMilliseconds, "上游空流关闭（转投下一渠道）");
+                        rsp.SendChunked = false;
+                        return WriteOutcome.Failover("上游空流关闭");
+                    }
+                    break;
+                }
+                copied += n;
                 await rsp.OutputStream.WriteAsync(buf.AsMemory(0, n), ct).ConfigureAwait(false);
                 await rsp.OutputStream.FlushAsync(ct).ConfigureAwait(false);
             }
             rsp.Close();
-            rt.NoteSuccess(elapsedMs);
-            _mgr.RecordRequest(model, chain, 200, elapsedMs, null);
-            return true;
+            rt.NoteSuccess(sw.ElapsedMilliseconds);
+            _mgr.RecordRequest(model, chain, 200, sw.ElapsedMilliseconds, null);
+            return WriteOutcome.Finished();
         }
         catch (Exception ex)
         {
-            // 客户端主动断开等写失败：不惩罚渠道（仅 idle 断流计数），如实记日志
-            _mgr.RecordRequest(model, chain, 200, elapsedMs, "SSE 写回中断：" + ex.Message);
+            if (copied == 0)
+            {
+                // 未写出任何字节：异常只可能来自上游读（连接破裂等确定性故障）→ 可转移
+                rt.NoteErrorFailure("SSE 读异常：" + ex.Message, DateTimeOffset.Now);
+                _mgr.RecordRequest(model, chain, null, sw.ElapsedMilliseconds, "上游读异常（转投下一渠道）");
+                rsp.SendChunked = false;
+                return WriteOutcome.Failover("上游读异常：" + Trunc(ex.Message, 80));
+            }
+            // 已写回（含客户端主动断开）：不惩罚渠道，如实记日志
+            var detail = "SSE 写回中断：" + ex.Message + $"（已流式 {streamed.Elapsed.TotalSeconds:F0}s / {copied}B）";
+            _mgr.RecordRequest(model, chain, 200, sw.ElapsedMilliseconds, detail);
             Abort(rsp);
-            return true;
+            return WriteOutcome.Finished();
         }
         finally
         {
             upstream?.Dispose();
             res.Dispose();
+        }
+    }
+
+    /// <summary>开流后断流：尽力向客户端发一条 SSE error 事件并干净关闭（chunked 终结帧，FIN 而非 RST）；失败则 Abort。</summary>
+    static async Task TryWriteSseErrorFrameAsync(HttpListenerResponse rsp, string detail, CancellationToken ct)
+    {
+        try
+        {
+            var payload = RelayJson.Serialize(new
+            {
+                error = new
+                {
+                    message = "中转：" + detail,
+                    type = "relay_upstream_failed",
+                    code = "stream_stalled",
+                },
+            });
+            var frame = Encoding.UTF8.GetBytes("data: " + payload + "\n\n");
+            await rsp.OutputStream.WriteAsync(frame, ct).ConfigureAwait(false);
+            await rsp.OutputStream.FlushAsync(ct).ConfigureAwait(false);
+            rsp.Close();
+        }
+        catch
+        {
+            Abort(rsp);
         }
     }
 
@@ -553,6 +630,13 @@ public sealed class RelayServer : IDisposable
     }
 
     enum UpstreamKind { Success, QuotaFailure, ServerError, NetworkError, ClientError }
+
+    /// <summary>写回结果：Failoverable=true 表示失败发生在向客户端写出任何字节之前，可交还上层转移。</summary>
+    sealed record WriteOutcome(bool Failoverable, string? Reason)
+    {
+        public static WriteOutcome Finished() => new(false, null);
+        public static WriteOutcome Failover(string reason) => new(true, reason);
+    }
 
     sealed class UpstreamOutcome
     {

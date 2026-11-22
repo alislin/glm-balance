@@ -358,6 +358,7 @@ public sealed class AdminApi
                 degradeBelowPct = o.DegradeBelowPct,
                 restoreAbovePct = o.RestoreAbovePct,
                 cooldown = new { o.Cooldown.QuotaSeconds, o.Cooldown.ErrorThreshold, o.Cooldown.ErrorSeconds },
+                stream = new { o.Stream.FirstChunkSeconds, o.Stream.IdleSeconds },
                 hasToken = o.LocalToken.Length > 0,
                 authDisabled = !_mgr.Running ? false : _mgr.EffectiveToken.Length == 0,
                 adminUrl = o.AdminUrl,
@@ -415,6 +416,11 @@ public sealed class AdminApi
                 if ((int?)cd["quotaSeconds"] is int qs) o.Cooldown.QuotaSeconds = Math.Clamp(qs, 5, 86400);
                 if ((int?)cd["errorThreshold"] is int et) o.Cooldown.ErrorThreshold = Math.Clamp(et, 1, 100);
                 if ((int?)cd["errorSeconds"] is int es) o.Cooldown.ErrorSeconds = Math.Clamp(es, 5, 86400);
+            }
+            if (body["stream"] is JsonObject sm)
+            {
+                if ((int?)sm["firstChunkSeconds"] is int fcs) o.Stream.FirstChunkSeconds = Math.Clamp(fcs, 10, 1800);
+                if ((int?)sm["idleSeconds"] is int isc) o.Stream.IdleSeconds = Math.Clamp(isc, 10, 1800);
             }
 
             var tokenReset = body["resetToken"]?.GetValue<bool>() == true;

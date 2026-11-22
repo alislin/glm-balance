@@ -43,6 +43,18 @@ public sealed class RelayCooldownOptions
     public int ErrorSeconds { get; set; } = 60;
 }
 
+/// <summary>SSE 流式转发超时参数（响应驱动）。</summary>
+public sealed class RelayStreamOptions
+{
+    /// <summary>
+    /// 上游响应头已到但首个 chunk 未到的空闲上限（秒）。大 prompt 的首块延迟属正常请求
+    /// （上游在处理，只是慢），宁可多等不可误杀；超时视为渠道级故障，向客户端回结构化错误。
+    /// </summary>
+    public int FirstChunkSeconds { get; set; } = 600;
+    /// <summary>开流后（已收到并写出 chunk）的上游 idle 上限（秒）。此时已无法转移，向客户端发 SSE 错误帧后干净收尾。</summary>
+    public int IdleSeconds { get; set; } = 300;
+}
+
 /// <summary>
 /// relay 配置段（glmbalance-taskbar.json 的 "relay" 节）。
 /// "relay" 段整体缺省 → 中转关闭，原功能零影响。
@@ -57,6 +69,7 @@ public sealed class RelayOptions
     public int DegradeBelowPct { get; set; } = 5;
     public int RestoreAbovePct { get; set; } = 10;
     public RelayCooldownOptions Cooldown { get; set; } = new();
+    public RelayStreamOptions Stream { get; set; } = new();
     public List<ProviderConfig> Providers { get; set; } = new();
     /// <summary>agents.pi.configPath（Pi 配置路径，占位预留）。</summary>
     public string PiConfigPath { get; set; } = "";
@@ -108,6 +121,12 @@ public sealed class RelayOptions
                 o.Cooldown.QuotaSeconds = (int?)cd.Prop("quotaSeconds").Num() ?? 300;
                 o.Cooldown.ErrorThreshold = (int?)cd.Prop("errorThreshold").Num() ?? 3;
                 o.Cooldown.ErrorSeconds = (int?)cd.Prop("errorSeconds").Num() ?? 60;
+            }
+
+            if (relay.Prop("stream") is { ValueKind: JsonValueKind.Object } st)
+            {
+                o.Stream.FirstChunkSeconds = (int?)st.Prop("firstChunkSeconds").Num() ?? 600;
+                o.Stream.IdleSeconds = (int?)st.Prop("idleSeconds").Num() ?? 300;
             }
 
             if (relay.Prop("providers") is { ValueKind: JsonValueKind.Array } ps)
@@ -167,6 +186,8 @@ public sealed class RelayOptions
         o.Cooldown.QuotaSeconds = Math.Clamp(o.Cooldown.QuotaSeconds, 5, 86400);
         o.Cooldown.ErrorThreshold = Math.Clamp(o.Cooldown.ErrorThreshold, 1, 100);
         o.Cooldown.ErrorSeconds = Math.Clamp(o.Cooldown.ErrorSeconds, 5, 86400);
+        o.Stream.FirstChunkSeconds = Math.Clamp(o.Stream.FirstChunkSeconds, 10, 1800);
+        o.Stream.IdleSeconds = Math.Clamp(o.Stream.IdleSeconds, 10, 1800);
         return o;
     }
 
@@ -220,6 +241,11 @@ public sealed class RelayOptions
                 ["quotaSeconds"] = Cooldown.QuotaSeconds,
                 ["errorThreshold"] = Cooldown.ErrorThreshold,
                 ["errorSeconds"] = Cooldown.ErrorSeconds,
+            },
+            ["stream"] = new JsonObject
+            {
+                ["firstChunkSeconds"] = Stream.FirstChunkSeconds,
+                ["idleSeconds"] = Stream.IdleSeconds,
             },
             ["providers"] = arr,
             ["agents"] = new JsonObject

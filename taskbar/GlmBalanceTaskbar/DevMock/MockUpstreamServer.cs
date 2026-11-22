@@ -17,13 +17,17 @@ public sealed class DevMockOptions
     public List<long>? ActivitySeries { get; set; }
 }
 
-/// <summary>按渠道 id 的 mock 规则（chatStatus / modelsStatus / streamBreak）。</summary>
+/// <summary>按渠道 id 的 mock 规则（chatStatus / modelsStatus / streamBreak / streamStall）。</summary>
 public sealed class DevMockProviderRules
 {
     public int ChatStatus { get; set; } = 200;
     public int ModelsStatus { get; set; } = 200;
     /// <summary>true = 发 2 个 chunk 后直接断开 TCP（触发 NoteStreamBroken）。</summary>
     public bool StreamBreak { get; set; }
+    /// <summary>&gt;0 = 发 StreamStallAfterChunks 个 chunk 后挂起 N 秒再断开（演练 SSE 空闲超时路径）。</summary>
+    public int StreamStallSeconds { get; set; }
+    /// <summary>StreamStallSeconds 模式下先发送的 chunk 数（0 = 响应头后立即停摆 → 首块超时）。</summary>
+    public int StreamStallAfterChunks { get; set; }
 }
 
 /// <summary>
@@ -239,7 +243,12 @@ public sealed class MockUpstreamServer : IDisposable
 
     long _seq;
 
-    /// <summary>SSE：N 个 delta chunk 拼出 chatContent；streamBreak=true 时发 2 个 chunk 后直接断开 TCP。</summary>
+    /// <summary>
+    /// SSE：N 个 delta chunk 拼出 chatContent。
+    /// streamBreak=true：发 2 个 chunk 后直接断开 TCP。
+    /// streamStallSeconds&gt;0：发 StreamStallAfterChunks 个 chunk 后挂起 N 秒再断开
+    /// （AfterChunks=0 → 首块停摆；&gt;0 → 开流后停摆）。
+    /// </summary>
     async Task WriteSseAsync(HttpListenerResponse rsp, string model, DevMockProviderRules? rules, CancellationToken ct)
     {
         rsp.StatusCode = 200;
@@ -249,6 +258,8 @@ public sealed class MockUpstreamServer : IDisposable
         var content = _rules.ChatContent;
         var chunks = (int)Math.Ceiling(content.Length / 4.0);
         if (rules?.StreamBreak == true && chunks < 3) chunks = 3;
+        var stall = rules?.StreamStallSeconds ?? 0;
+        var stallAfter = rules?.StreamStallAfterChunks ?? 0;
 
         try
         {
@@ -256,6 +267,7 @@ public sealed class MockUpstreamServer : IDisposable
             for (var i = 0; i < chunks; i++)
             {
                 if (rules?.StreamBreak == true && ++sent > 2) break;
+                if (stall > 0 && sent >= stallAfter) break;
 
                 var piece = content.Substring(i * 4, Math.Min(4, content.Length - i * 4));
                 var delta = new
@@ -271,8 +283,22 @@ public sealed class MockUpstreamServer : IDisposable
                 var bytes = Encoding.UTF8.GetBytes("data: " + JsonSerializer.Serialize(delta) + "\n\n");
                 await rsp.OutputStream.WriteAsync(bytes, ct).ConfigureAwait(false);
                 await rsp.OutputStream.FlushAsync(ct).ConfigureAwait(false);
+                sent++;
                 try { await Task.Delay(10, ct).ConfigureAwait(false); }
                 catch (OperationCanceledException) { return; }
+            }
+
+            if (stall > 0)
+            {
+                // 先显式 Flush 推送响应头（HttpListener 头随首写惰性发送），
+                // 让 relay 进入“头已到、body 未到”的首块等待窗口，再进入停摆
+                await rsp.OutputStream.FlushAsync(ct).ConfigureAwait(false);
+                // 演练点：先发 stallAfter 个 chunk，然后挂起 stall 秒不关流再断开——
+                // 让 relay 侧超时先到（真实走 idle/首块超时分支），验证 502 / 错误帧收尾
+                try { await Task.Delay(TimeSpan.FromSeconds(stall), ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) { return; }
+                rsp.Abort();
+                return;
             }
 
             if (rules?.StreamBreak == true)

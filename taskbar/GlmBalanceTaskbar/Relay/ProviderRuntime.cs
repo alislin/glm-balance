@@ -185,7 +185,7 @@ public sealed class ProviderRuntime
         }
     }
 
-    /// <summary>SSE 中途断流：不重试，该渠道错误计数 +1。</summary>
+    /// <summary>SSE 断流（含首块超时）：该渠道错误计数 +1。是否转投由 RelayServer 依"是否已写回客户端"与失败类别决定。</summary>
     public void NoteStreamBroken(string error, DateTimeOffset now)
     {
         lock (_gate)
