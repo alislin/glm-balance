@@ -58,6 +58,8 @@ public sealed class RelayManager : IDisposable
 
     public RelayOptions Options => _opts;
     public ChannelRouter Router => _router;
+    /// <summary>全局探测配置（团队版组织/项目/维度/监控域名）。共享引用，内存热更新即时可见。</summary>
+    public AppConfig Global => _cfg;
     public bool Running { get; private set; }
     /// <summary>配置文件存在 relay 段（false = 未初始化引导态：等待用户点击「启用中转」）。</summary>
     public bool Initialized { get; }
@@ -353,7 +355,7 @@ public sealed class RelayManager : IDisposable
     }
 
     /// <summary>AppContext.Apply() 后把最新快照喂给探测缓存。</summary>
-    public void FeedSnapshot(UsageSnapshot s)
+    public void FeedSnapshot(UsageSnapshot? s)
     {
         _lastSnap = s;
     }
@@ -481,17 +483,37 @@ public sealed class RelayManager : IDisposable
     // ─────────────────────────── 持久化（唯一写路径） ───────────────────────────
 
     /// <summary>合并写回配置文件并让变更生效（重建池、热更新参数）。离线模式拒绝写。</summary>
-    public bool PersistAndApply(Func<JsonObject, JsonObject> mutateRelay, List<string>? warnings = null)
+    public bool PersistAndApply(Func<JsonObject, JsonObject> mutateRelay, List<string>? warnings = null,
+        Func<JsonObject, JsonObject>? mutateRoot = null)
     {
         if (_offline) return false;
         bool ok;
         lock (_persistLock)
         {
-            ok = RelayOptions.Persist(_configPath, mutateRelay, warnings);
+            ok = RelayOptions.Persist(_configPath, mutateRelay, warnings, mutateRoot);
         }
         if (ok) ApplyOptions();
         return ok;
     }
+
+    // ─────────────────────── 团队版探测全局字段（根级配置） ───────────────────────
+
+    /// <summary>
+    /// 内存热更新：直接改共享 AppConfig 实例（_cfg / ProbeContext.Global / 30s 轮询的 GlmApiClient 同一引用，
+    /// 客户端每次请求现读字段 → 即时生效，无需重启）。usageType=null 时按 Config.Load 同源规则推导
+    /// （有 org → 2，否则无维度）；并作废最近快照，下一轮探测按新维度重抓。
+    /// 写回由 AdminApi 经 PersistAndApply 的 mutateRoot 完成（与其他设置同请求原子落盘）。
+    /// </summary>
+    public void ApplyGlobalProbeSettings(string? organization, string? project, int? usageType, string? monitorBase)
+    {
+        _cfg.Organization = NullIfEmpty(organization);
+        _cfg.Project = NullIfEmpty(project);
+        _cfg.UsageType = usageType ?? (NullIfEmpty(organization) != null ? 2 : null);
+        _cfg.MonitorBase = string.IsNullOrWhiteSpace(monitorBase) ? "https://open.bigmodel.cn" : monitorBase.Trim();
+        _lastSnap = null; // 作废最近快照：探测复用链不再视为新鲜，下一轮按新维度重抓
+    }
+
+    static string? NullIfEmpty(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 
     /// <summary>不写文件、仅把内存选项套用到运行时（池重建、探测间隔/阈值热更新、token 生效）。</summary>
     public void ApplyOptions()

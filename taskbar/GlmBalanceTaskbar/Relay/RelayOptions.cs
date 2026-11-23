@@ -257,9 +257,12 @@ public sealed class RelayOptions
 
     /// <summary>
     /// 合并写回：读取原文件 → mutate(relay 节) → 原样保留其余字段写回。
+    /// mutateRoot 可选：relay 节挂回后对根对象应用二次变更（如团队版探测的根级字段），
+    /// 返回非原引用时按整节点替换挂回根。默认 null = 仅 relay 节变更（现状逐字节一致）。
     /// 全应用唯一的 glmbalance-taskbar.json 写路径（持久化锁由调用方持有）。
     /// </summary>
-    public static bool Persist(string path, Func<JsonObject, JsonObject> mutateRelay, List<string>? warnings = null)
+    public static bool Persist(string path, Func<JsonObject, JsonObject> mutateRelay, List<string>? warnings = null,
+        Func<JsonObject, JsonObject>? mutateRoot = null)
     {
         try
         {
@@ -282,6 +285,12 @@ public sealed class RelayOptions
                 // 就地修改式 mutator 返回同一引用，此处无操作。修复：返回值此前被丢弃，
                 // 导致 ToJson() 式写回静默失效（relay 节点写成 {}）。
                 root["relay"] = mutated;
+            }
+            if (mutateRoot != null)
+            {
+                // 根级 mutator（团队版探测字段等）：返回非原引用（整根替换式）时挂回。
+                var rooted = mutateRoot(root);
+                if (rooted != null && !ReferenceEquals(rooted, root)) root = rooted;
             }
             WriteAtomic(path, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
             return true;

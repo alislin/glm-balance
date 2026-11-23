@@ -197,6 +197,20 @@
     </div>
     <div id="st-msg" style="margin-top:8px"></div>
   </div>
+  <div class="card">
+    <b>用量探测（团队版）</b>
+    <div class="muted" style="margin-top:4px">zhipu-monitor 探测使用的全局鉴权要素。组织/项目 ID 从官网用量统计页 F12 请求头 bigmodel-organization / bigmodel-project 复制；个人版套餐请清空组织并选「自动」。</div>
+    <div class="grid2" style="margin-top:10px">
+      <span>组织 ID</span><div><input type="text" id="st-org" style="width:100%" placeholder="org-…（清空 = 个人版）"></div>
+      <span>项目 ID</span><div><input type="text" id="st-project" style="width:100%" placeholder="proj_…（清空 = 不带项目头）"></div>
+      <span>用量维度</span><div class="row"><select id="st-usage-type"><option value="">自动（有组织=团队）</option><option value="1">个人版</option><option value="2">团队版</option></select></div>
+      <span>监控域名</span><div class="row"><input type="text" id="st-monitor-base" style="width:280px" placeholder="https://open.bigmodel.cn"><span class="muted">高级；z.ai 账号填 https://api.z.ai</span></div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="act primary" onclick="saveProbeSettings()">保存探测配置</button>
+    </div>
+    <div id="st-probe-msg" style="margin-top:8px"></div>
+  </div>
 </section>
 
 </main>
@@ -717,6 +731,11 @@ async function loadSettings() {
   document.getElementById("st-quota").value = s.cooldown.quotaSeconds;
   document.getElementById("st-eth").value = s.cooldown.errorThreshold;
   document.getElementById("st-ets").value = s.cooldown.errorSeconds;
+  // 团队版探测全局字段
+  document.getElementById("st-org").value = s.organization || "";
+  document.getElementById("st-project").value = s.project || "";
+  document.getElementById("st-usage-type").value = s.usageType != null ? String(s.usageType) : "";
+  document.getElementById("st-monitor-base").value = s.monitorBase || "";
   const st = document.getElementById("st-relay-state");
   st.textContent = _relayRunning ? "运行中（端口 " + s.port + "）"
     : _relayInitialized ? "已关闭" : "未初始化";
@@ -765,6 +784,26 @@ async function saveSettings() {
     showMsg("st-msg", r.message || "已保存", true);
     (r.warnings || []).forEach(w => showMsg("st-msg", "⚠ " + w, true));
   } catch (e) { showMsg("st-msg", e.message, false); }
+}
+
+async function saveProbeSettings() {
+  const org = document.getElementById("st-org").value.trim();
+  const usageTypeVal = document.getElementById("st-usage-type").value;
+  const body = {
+    organization: org,           // 空串 = 清除（个人版/回落推导）
+    project: document.getElementById("st-project").value.trim(),
+    usageType: usageTypeVal === "" ? null : parseInt(usageTypeVal, 10),
+    monitorBase: document.getElementById("st-monitor-base").value.trim(),
+  };
+  try {
+    const r = await api("/api/settings", {
+      method: "PUT", headers: Object.assign({ "Content-Type": "application/json" }, hdrs()),
+      body: JSON.stringify(body),
+    });
+    showMsg("st-probe-msg", r.message || "已保存", r.ok);
+    (r.warnings || []).forEach(w => showMsg("st-probe-msg", "⚠ " + w, true));
+    if (r.ok) await loadSettings();
+  } catch (e) { showMsg("st-probe-msg", e.message, false); }
 }
 
 async function resetToken() {
