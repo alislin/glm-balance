@@ -210,7 +210,16 @@ public sealed class AdminApi
 
                 var isNew = rt == null;
                 var pc = isNew ? new ProviderConfig { Id = providerId, Priority = NextPriority() } : CloneConfig(rt!.Config);
-                ApplyProviderPatch(pc, body);
+                try
+                {
+                    ApplyProviderPatch(pc, body);
+                }
+                catch (ArgumentException ex)
+                {
+                    // 探测要素等字段值非法（如 usageType 非 1/2）：400 语义化返回，不落 500
+                    await WriteAsync(rsp, 400, RelayJson.Serialize(new { error = ex.Message })).ConfigureAwait(false);
+                    return;
+                }
                 pc.Id = providerId;
 
                 // 内存同步更新（ApplyOptions 依此重建池），再写回配置文件（F6：串行化）
@@ -355,7 +364,6 @@ public sealed class AdminApi
         if (method == "GET")
         {
             var o = _mgr.Options;
-            var g = _mgr.Global;
             await WriteAsync(rsp, 200, RelayJson.Serialize(new
             {
                 port = o.Port,
@@ -371,11 +379,6 @@ public sealed class AdminApi
                 running = _mgr.Running,
                 enabled = o.Enabled,
                 initialized = _mgr.Initialized,
-                // 团队版探测全局字段（组织/项目/维度/监控域名）；org/project 明文返回（非 key 级敏感，接口有 Bearer 鉴权）
-                organization = g.Organization,
-                project = g.Project,
-                usageType = g.UsageType,
-                monitorBase = g.MonitorBase,
             })).ConfigureAwait(false);
             return;
         }
@@ -442,58 +445,7 @@ public sealed class AdminApi
                 warnings.Add("token 已重置：opencode 端 localrelay provider 需同步重新部署，否则请求将 401");
             }
 
-            // 团队版探测全局字段：键存在才处理（部分更新约定）；null/空串 = 清除（删根级键，回落 tui.json/推导）。
-            // 未发送的键解析为当前生效值（保持不变，不误清）；usageType：1/2 显式写；JSON null = 自动（有 org 推导 2）。
-            var g = _mgr.Global;
-            var hasOrg = body.ContainsKey("organization");
-            var hasProject = body.ContainsKey("project");
-            var hasUsageType = body.ContainsKey("usageType");
-            var hasMonitorBase = body.ContainsKey("monitorBase");
-            string? org = null, proj = null, monBase = null;
-            int? usageType = null;
-            if (hasOrg) org = NullIfEmpty(body["organization"]?.ToString());
-            if (hasProject) proj = NullIfEmpty(body["project"]?.ToString());
-            if (hasMonitorBase) monBase = NullIfEmpty(body["monitorBase"]?.ToString());
-            if (hasUsageType && body["usageType"] is { } utNode)
-            {
-                if (!int.TryParse(utNode.ToString(), out var ut) || (ut != 1 && ut != 2))
-                {
-                    await WriteAsync(rsp, 400, "{\"error\":\"usageType 仅支持 1（个人）/ 2（团队）或 null（自动）\"}").ConfigureAwait(false);
-                    return;
-                }
-                usageType = ut;
-            }
-            if (!hasOrg) org = g.Organization;
-            if (!hasProject) proj = g.Project;
-            if (!hasMonitorBase) monBase = g.MonitorBase;
-            if (!hasUsageType)
-            {
-                // 未显式给维度：清空组织的请求同时回到自动推导，否则保持现值
-                usageType = hasOrg && org == null ? null : g.UsageType;
-            }
-            var probeSettingsChanged = hasOrg || hasProject || hasUsageType || hasMonitorBase;
-
-            var ok = enabledApplied && _mgr.PersistAndApply(relay => _mgr.Options.ToJson(), warnings,
-                probeSettingsChanged
-                    ? root =>
-                    {
-                        void SetOrRemove(string key, JsonNode? value)
-                        {
-                            if (value == null) root.Remove(key);
-                            else root[key] = value;
-                        }
-                        SetOrRemove("organization", org is null ? null : JsonValue.Create(org));
-                        SetOrRemove("project", proj is null ? null : JsonValue.Create(proj));
-                        SetOrRemove("usageType", usageType is null ? null : JsonValue.Create(usageType));
-                        SetOrRemove("monitorBase", monBase is null ? null : JsonValue.Create(monBase));
-                        return root;
-                    }
-                    : null); // 设置整节点重序列化（含 providers 原样）
-            if (ok && probeSettingsChanged)
-            {
-                // 内存热更新共享 AppConfig（探测即时生效）并作废快照，下一轮按新维度重抓
-                _mgr.ApplyGlobalProbeSettings(org, proj, usageType, monBase);
-            }
+            var ok = enabledApplied && _mgr.PersistAndApply(relay => _mgr.Options.ToJson(), warnings); // 设置整节点重序列化（含 providers 原样）
             var allWarnings = startStopWarnings.Concat(warnings).ToList();
             await WriteAsync(rsp, ok ? 200 : 500, RelayJson.Serialize(new
             {
@@ -570,7 +522,7 @@ public sealed class AdminApi
         });
     }
 
-    /// <summary>API 响应节点：key 一律掩码（只写不读），附 hasKey 供 UI 判断。</summary>
+    /// <summary>更新类 API：key 只写不读（掩码形态 = 未修改），探测要素 provider 级覆盖。</summary>
     static JsonObject ProviderToJson(ProviderRuntime rt)
     {
         var p = rt.Config;
@@ -585,6 +537,11 @@ public sealed class AdminApi
             ["hasKey"] = !string.IsNullOrEmpty(p.ApiKey),
             ["models"] = new JsonArray(p.Models.Select(m => JsonValue.Create(m)).ToArray()),
             ["enabled"] = p.Enabled,
+            // 探测要素（明文，非 key 级敏感；null = 回落全局）
+            ["organization"] = p.Organization,
+            ["project"] = p.Project,
+            ["usageType"] = p.UsageType,
+            ["monitorBase"] = p.MonitorBase,
         };
     }
 
@@ -608,6 +565,24 @@ public sealed class AdminApi
             pc.Models = ms.Where(m => m != null).Select(m => m!.ToString()).Where(s => s.Length > 0).ToList();
         }
         if (body["enabled"] is JsonNode en) pc.Enabled = en.GetValue<bool>();
+
+        // 探测要素（provider 级）：键不存在 = 保持现值；null/空串 = 清除（回落全局）；usageType 仅 1/2/null。
+        if (body.ContainsKey("organization")) pc.Organization = NullIfEmpty(body["organization"]?.ToString());
+        if (body.ContainsKey("project")) pc.Project = NullIfEmpty(body["project"]?.ToString());
+        if (body.ContainsKey("monitorBase")) pc.MonitorBase = NullIfEmpty(body["monitorBase"]?.ToString());
+        if (body.ContainsKey("usageType"))
+        {
+            if (body["usageType"] is { } utNode)
+            {
+                if (!int.TryParse(utNode.ToString(), out var ut) || (ut != 1 && ut != 2))
+                    throw new ArgumentException("usageType 仅支持 1（个人）/ 2（团队）或 null（自动）");
+                pc.UsageType = ut;
+            }
+            else
+            {
+                pc.UsageType = null;
+            }
+        }
     }
 
     internal static bool IsMaskedKey(string incoming, string original)
@@ -642,6 +617,10 @@ public sealed class AdminApi
         ApiKey = p.ApiKey,
         Models = p.Models.ToList(),
         Enabled = p.Enabled,
+        Organization = p.Organization,
+        Project = p.Project,
+        UsageType = p.UsageType,
+        MonitorBase = p.MonitorBase,
     };
 
     static JsonArray ProvidersArray(JsonObject relayRoot)

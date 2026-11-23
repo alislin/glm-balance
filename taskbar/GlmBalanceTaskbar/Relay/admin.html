@@ -197,20 +197,6 @@
     </div>
     <div id="st-msg" style="margin-top:8px"></div>
   </div>
-  <div class="card">
-    <b>用量探测（团队版）</b>
-    <div class="muted" style="margin-top:4px">zhipu-monitor 探测使用的全局鉴权要素。组织/项目 ID 从官网用量统计页 F12 请求头 bigmodel-organization / bigmodel-project 复制；个人版套餐请清空组织并选「自动」。</div>
-    <div class="grid2" style="margin-top:10px">
-      <span>组织 ID</span><div><input type="text" id="st-org" style="width:100%" placeholder="org-…（清空 = 个人版）"></div>
-      <span>项目 ID</span><div><input type="text" id="st-project" style="width:100%" placeholder="proj_…（清空 = 不带项目头）"></div>
-      <span>用量维度</span><div class="row"><select id="st-usage-type"><option value="">自动（有组织=团队）</option><option value="1">个人版</option><option value="2">团队版</option></select></div>
-      <span>监控域名</span><div class="row"><input type="text" id="st-monitor-base" style="width:280px" placeholder="https://open.bigmodel.cn"><span class="muted">高级；z.ai 账号填 https://api.z.ai</span></div>
-    </div>
-    <div class="row" style="margin-top:8px">
-      <button class="act primary" onclick="saveProbeSettings()">保存探测配置</button>
-    </div>
-    <div id="st-probe-msg" style="margin-top:8px"></div>
-  </div>
 </section>
 
 </main>
@@ -241,6 +227,11 @@
       <span>apiKey</span><div class="row"><input type="text" id="pv-key" style="width:280px" placeholder="留空 = 复用全局读取链"><span class="muted" id="pv-key-hint"></span></div>
       <span>模型（逗号分隔）</span><input type="text" id="pv-models" style="width:340px">
       <span>启用</span><input type="checkbox" id="pv-enabled" checked>
+      <span style="grid-column:1/3;border-top:1px solid var(--line,#333);padding-top:8px;margin-top:4px"><b>用量探测要素（zhipu-monitor）</b><div class="muted">混合账号池：每渠道绑定自己的账号维度；留空 = 复用全局。组织/项目 ID 从官网用量统计页 F12 请求头 bigmodel-organization / bigmodel-project 复制。</div></span>
+      <span>组织 ID</span><input type="text" id="pv-org" placeholder="org-…（留空 = 复用全局）">
+      <span>项目 ID</span><input type="text" id="pv-project" placeholder="proj_…（留空 = 复用全局）">
+      <span>用量维度</span><div class="row"><select id="pv-usage-type"><option value="">自动（有组织=团队）</option><option value="1">个人版</option><option value="2">团队版</option></select></div>
+      <span>监控域名</span><input type="text" id="pv-monitor-base" placeholder="https://open.bigmodel.cn（留空 = 由 baseURL 推导）">
     </div>
     <div class="row" style="justify-content:flex-end;margin-top:12px">
       <button class="act" onclick="closeModal()">取消</button>
@@ -559,10 +550,16 @@ async function editProvider(id) {
   document.getElementById("pv-key-hint").textContent = id ? (p.apiKey ? "当前：" + p.apiKey + "（留空保持不变）" : "当前：空（复用全局）") : "留空 = 复用全局读取链";
   document.getElementById("pv-models").value = (p.models || []).join(", ");
   document.getElementById("pv-enabled").checked = !!p.enabled;
+  // 探测要素回填（null → 空串 = 回落全局）
+  document.getElementById("pv-org").value = p.organization || "";
+  document.getElementById("pv-project").value = p.project || "";
+  document.getElementById("pv-usage-type").value = p.usageType != null ? String(p.usageType) : "";
+  document.getElementById("pv-monitor-base").value = p.monitorBase || "";
   document.getElementById("pv-modal").classList.remove("hidden");
 }
 
 async function saveProvider() {
+  const usageTypeVal = document.getElementById("pv-usage-type").value;
   const body = {
     name: document.getElementById("pv-name").value,
     priority: parseInt(document.getElementById("pv-priority").value || "10", 10),
@@ -570,6 +567,11 @@ async function saveProvider() {
     baseURL: document.getElementById("pv-base").value.trim(),
     models: document.getElementById("pv-models").value.split(/[,，]/).map(s => s.trim()).filter(Boolean),
     enabled: document.getElementById("pv-enabled").checked,
+    // 探测要素：空串 = 清除（回落全局），语义对齐 ApplyProviderPatch
+    organization: document.getElementById("pv-org").value.trim(),
+    project: document.getElementById("pv-project").value.trim(),
+    usageType: usageTypeVal === "" ? null : parseInt(usageTypeVal, 10),
+    monitorBase: document.getElementById("pv-monitor-base").value.trim(),
   };
   const key = document.getElementById("pv-key").value.trim();
   if (!_editing) body.id = document.getElementById("pv-id").value.trim();
@@ -731,11 +733,6 @@ async function loadSettings() {
   document.getElementById("st-quota").value = s.cooldown.quotaSeconds;
   document.getElementById("st-eth").value = s.cooldown.errorThreshold;
   document.getElementById("st-ets").value = s.cooldown.errorSeconds;
-  // 团队版探测全局字段
-  document.getElementById("st-org").value = s.organization || "";
-  document.getElementById("st-project").value = s.project || "";
-  document.getElementById("st-usage-type").value = s.usageType != null ? String(s.usageType) : "";
-  document.getElementById("st-monitor-base").value = s.monitorBase || "";
   const st = document.getElementById("st-relay-state");
   st.textContent = _relayRunning ? "运行中（端口 " + s.port + "）"
     : _relayInitialized ? "已关闭" : "未初始化";
@@ -784,26 +781,6 @@ async function saveSettings() {
     showMsg("st-msg", r.message || "已保存", true);
     (r.warnings || []).forEach(w => showMsg("st-msg", "⚠ " + w, true));
   } catch (e) { showMsg("st-msg", e.message, false); }
-}
-
-async function saveProbeSettings() {
-  const org = document.getElementById("st-org").value.trim();
-  const usageTypeVal = document.getElementById("st-usage-type").value;
-  const body = {
-    organization: org,           // 空串 = 清除（个人版/回落推导）
-    project: document.getElementById("st-project").value.trim(),
-    usageType: usageTypeVal === "" ? null : parseInt(usageTypeVal, 10),
-    monitorBase: document.getElementById("st-monitor-base").value.trim(),
-  };
-  try {
-    const r = await api("/api/settings", {
-      method: "PUT", headers: Object.assign({ "Content-Type": "application/json" }, hdrs()),
-      body: JSON.stringify(body),
-    });
-    showMsg("st-probe-msg", r.message || "已保存", r.ok);
-    (r.warnings || []).forEach(w => showMsg("st-probe-msg", "⚠ " + w, true));
-    if (r.ok) await loadSettings();
-  } catch (e) { showMsg("st-probe-msg", e.message, false); }
 }
 
 async function resetToken() {

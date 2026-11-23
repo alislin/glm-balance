@@ -18,18 +18,44 @@ public sealed class ProviderConfig
     public List<string> Models { get; set; } = new();
     public bool Enabled { get; set; } = true;
 
+    // ── zhipu-monitor 探测要素（provider 级覆盖；null = 回落全局链）。混合账号池：每渠道绑定自己的账号维度。 ──
+    /// <summary>团队组织 ID（bigmodel-organization 头）；null/空 = 回落全局。</summary>
+    public string? Organization { get; set; }
+    /// <summary>团队项目 ID（bigmodel-project 头）；null/空 = 回落全局。</summary>
+    public string? Project { get; set; }
+    /// <summary>用量维度：1=个人 2=团队；null = 自动（有 org 推导 2）。</summary>
+    public int? UsageType { get; set; }
+    /// <summary>监控 API 域名；null/空 = 由 baseURL 域名推导，再回落全局。</summary>
+    public string? MonitorBase { get; set; }
+
+    /// <summary>是否有任一探测要素为 provider 自有（决定探测能否复用全局快照：有覆盖 → 不复用，防止跨账号冒用）。</summary>
+    public bool HasProbeOverrides =>
+        !string.IsNullOrWhiteSpace(Organization) ||
+        !string.IsNullOrWhiteSpace(Project) ||
+        UsageType != null ||
+        !string.IsNullOrWhiteSpace(MonitorBase);
+
     /// <summary>配置写回节点（真实 key，仅供 glmbalance-taskbar.json 唯一写路径使用）。</summary>
-    public JsonObject ToJsonNode() => new()
+    public JsonObject ToJsonNode()
     {
-        ["id"] = Id,
-        ["name"] = Name,
-        ["priority"] = Priority,
-        ["probe"] = Probe,
-        ["baseURL"] = BaseUrl,
-        ["apiKey"] = ApiKey,
-        ["models"] = new JsonArray(Models.Select(m => JsonValue.Create(m)).ToArray()),
-        ["enabled"] = Enabled,
-    };
+        var node = new JsonObject
+        {
+            ["id"] = Id,
+            ["name"] = Name,
+            ["priority"] = Priority,
+            ["probe"] = Probe,
+            ["baseURL"] = BaseUrl,
+            ["apiKey"] = ApiKey,
+            ["models"] = new JsonArray(Models.Select(m => JsonValue.Create(m)).ToArray()),
+            ["enabled"] = Enabled,
+        };
+        // 探测要素：null 不写键（缺省 = 回落全局，配置文件保持干净）
+        if (!string.IsNullOrWhiteSpace(Organization)) node["organization"] = Organization;
+        if (!string.IsNullOrWhiteSpace(Project)) node["project"] = Project;
+        if (UsageType is int ut) node["usageType"] = ut;
+        if (!string.IsNullOrWhiteSpace(MonitorBase)) node["monitorBase"] = MonitorBase;
+        return node;
+    }
 }
 
 /// <summary>硬冷却参数（响应驱动）。</summary>
@@ -149,6 +175,10 @@ public sealed class RelayOptions
                         BaseUrl = p.Prop("baseURL").Str() ?? p.Prop("baseUrl").Str() ?? "",
                         ApiKey = p.Prop("apiKey").Str() ?? "",
                         Enabled = p.Prop("enabled").BoolVal() ?? true,
+                        Organization = p.Prop("organization").Str(),
+                        Project = p.Prop("project").Str(),
+                        UsageType = (int?)p.Prop("usageType").Num(),
+                        MonitorBase = p.Prop("monitorBase").Str(),
                     };
                     if (p.Prop("models") is { ValueKind: JsonValueKind.Array } ms)
                     {
@@ -257,12 +287,9 @@ public sealed class RelayOptions
 
     /// <summary>
     /// 合并写回：读取原文件 → mutate(relay 节) → 原样保留其余字段写回。
-    /// mutateRoot 可选：relay 节挂回后对根对象应用二次变更（如团队版探测的根级字段），
-    /// 返回非原引用时按整节点替换挂回根。默认 null = 仅 relay 节变更（现状逐字节一致）。
     /// 全应用唯一的 glmbalance-taskbar.json 写路径（持久化锁由调用方持有）。
     /// </summary>
-    public static bool Persist(string path, Func<JsonObject, JsonObject> mutateRelay, List<string>? warnings = null,
-        Func<JsonObject, JsonObject>? mutateRoot = null)
+    public static bool Persist(string path, Func<JsonObject, JsonObject> mutateRelay, List<string>? warnings = null)
     {
         try
         {
@@ -285,12 +312,6 @@ public sealed class RelayOptions
                 // 就地修改式 mutator 返回同一引用，此处无操作。修复：返回值此前被丢弃，
                 // 导致 ToJson() 式写回静默失效（relay 节点写成 {}）。
                 root["relay"] = mutated;
-            }
-            if (mutateRoot != null)
-            {
-                // 根级 mutator（团队版探测字段等）：返回非原引用（整根替换式）时挂回。
-                var rooted = mutateRoot(root);
-                if (rooted != null && !ReferenceEquals(rooted, root)) root = rooted;
             }
             WriteAtomic(path, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
             return true;

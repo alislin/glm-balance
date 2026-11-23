@@ -16,14 +16,19 @@ public sealed class ZhipuMonitorProbe : IUsageProbe
 
     public async Task<ProbeResult> ProbeAsync(ProviderConfig p, CancellationToken ct)
     {
-        // 1) 复用 AppContext 快照（30s 配额轮询的最新结果）
-        var snap = _ctx.SnapshotProvider();
-        if (snap is { Error: null } && DateTimeOffset.Now - snap.FetchedAt < TimeSpan.FromSeconds(_ctx.FreshSeconds()))
+        // 1) 复用 AppContext 快照（30s 配额轮询的最新结果）。
+        //    守卫：仅 provider 无任何探测要素覆盖（org/project/type/monitorBase）时才可复用——
+        //    混合账号池下全局快照属于全局链账号，provider 自带要素 = 不同账号维度，不可冒用。
+        if (!p.HasProbeOverrides)
         {
-            return Pick(snap);
+            var snap = _ctx.SnapshotProvider();
+            if (snap is { Error: null } && DateTimeOffset.Now - snap.FetchedAt < TimeSpan.FromSeconds(_ctx.FreshSeconds()))
+            {
+                return Pick(snap);
+            }
         }
 
-        // 2) 过期/缺失 → 自行请求
+        // 2) 过期/缺失 → 自行请求（要素逐项 provider 优先，null 回落全局；与 key 的 ?? 模式一致）
         var key = NonEmpty(p.ApiKey) ?? _ctx.Global.ApiKey;
         if (key == null)
         {
@@ -33,10 +38,11 @@ public sealed class ZhipuMonitorProbe : IUsageProbe
         var probeCfg = new AppConfig
         {
             ApiKey = key,
-            MonitorBase = MonitorBase(p),
-            Organization = _ctx.Global.Organization,
-            Project = _ctx.Global.Project,
-            UsageType = _ctx.Global.UsageType,
+            MonitorBase = NonEmpty(p.MonitorBase) ?? MonitorBase(p),
+            Organization = NonEmpty(p.Organization) ?? _ctx.Global.Organization,
+            Project = NonEmpty(p.Project) ?? _ctx.Global.Project,
+            // usageType：provider 显式（1/2）优先；null = 自动，按解析后的组织归属推导（有 org → 2）
+            UsageType = p.UsageType ?? ((NonEmpty(p.Organization) ?? _ctx.Global.Organization) != null ? 2 : null),
             Activity = false,
         };
         using var client = new GlmApiClient(probeCfg);
