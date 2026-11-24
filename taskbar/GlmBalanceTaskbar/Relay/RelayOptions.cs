@@ -19,21 +19,19 @@ public sealed class ProviderConfig
     public bool Enabled { get; set; } = true;
 
     // ── zhipu-monitor 探测要素（provider 级覆盖；null = 回落全局链）。混合账号池：每渠道绑定自己的账号维度。 ──
+    // 监控域名不在此列：直接由渠道自身 baseURL 的域名推导（MonitorBase(p)），与当前配置绑定。
     /// <summary>团队组织 ID（bigmodel-organization 头）；null/空 = 回落全局。</summary>
     public string? Organization { get; set; }
     /// <summary>团队项目 ID（bigmodel-project 头）；null/空 = 回落全局。</summary>
     public string? Project { get; set; }
     /// <summary>用量维度：1=个人 2=团队；null = 自动（有 org 推导 2）。</summary>
     public int? UsageType { get; set; }
-    /// <summary>监控 API 域名；null/空 = 由 baseURL 域名推导，再回落全局。</summary>
-    public string? MonitorBase { get; set; }
 
     /// <summary>是否有任一探测要素为 provider 自有（决定探测能否复用全局快照：有覆盖 → 不复用，防止跨账号冒用）。</summary>
     public bool HasProbeOverrides =>
         !string.IsNullOrWhiteSpace(Organization) ||
         !string.IsNullOrWhiteSpace(Project) ||
-        UsageType != null ||
-        !string.IsNullOrWhiteSpace(MonitorBase);
+        UsageType != null;
 
     /// <summary>配置写回节点（真实 key，仅供 glmbalance-taskbar.json 唯一写路径使用）。</summary>
     public JsonObject ToJsonNode()
@@ -53,7 +51,6 @@ public sealed class ProviderConfig
         if (!string.IsNullOrWhiteSpace(Organization)) node["organization"] = Organization;
         if (!string.IsNullOrWhiteSpace(Project)) node["project"] = Project;
         if (UsageType is int ut) node["usageType"] = ut;
-        if (!string.IsNullOrWhiteSpace(MonitorBase)) node["monitorBase"] = MonitorBase;
         return node;
     }
 }
@@ -178,7 +175,6 @@ public sealed class RelayOptions
                         Organization = p.Prop("organization").Str(),
                         Project = p.Prop("project").Str(),
                         UsageType = (int?)p.Prop("usageType").Num(),
-                        MonitorBase = p.Prop("monitorBase").Str(),
                     };
                     if (p.Prop("models") is { ValueKind: JsonValueKind.Array } ms)
                     {

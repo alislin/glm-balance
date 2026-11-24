@@ -120,7 +120,6 @@ public sealed class RelayManager : IDisposable
         Organization = p.Organization,
         Project = p.Project,
         UsageType = p.UsageType,
-        MonitorBase = p.MonitorBase,
     };
 
     static string? NonEmpty(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();

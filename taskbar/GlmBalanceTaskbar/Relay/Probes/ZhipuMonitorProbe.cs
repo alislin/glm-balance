@@ -38,7 +38,7 @@ public sealed class ZhipuMonitorProbe : IUsageProbe
         var probeCfg = new AppConfig
         {
             ApiKey = key,
-            MonitorBase = NonEmpty(p.MonitorBase) ?? MonitorBase(p),
+            MonitorBase = MonitorBase(p), // 监控域名与渠道 baseURL 绑定（域名推导），无 provider 级覆盖
             Organization = NonEmpty(p.Organization) ?? _ctx.Global.Organization,
             Project = NonEmpty(p.Project) ?? _ctx.Global.Project,
             // usageType：provider 显式（1/2）优先；null = 自动，按解析后的组织归属推导（有 org → 2）

@@ -537,11 +537,10 @@ public sealed class AdminApi
             ["hasKey"] = !string.IsNullOrEmpty(p.ApiKey),
             ["models"] = new JsonArray(p.Models.Select(m => JsonValue.Create(m)).ToArray()),
             ["enabled"] = p.Enabled,
-            // 探测要素（明文，非 key 级敏感；null = 回落全局）
+            // 探测要素（明文，非 key 级敏感；null = 回落全局）。监控域名不在此列：随渠道 baseURL 推导。
             ["organization"] = p.Organization,
             ["project"] = p.Project,
             ["usageType"] = p.UsageType,
-            ["monitorBase"] = p.MonitorBase,
         };
     }
 
@@ -567,9 +566,9 @@ public sealed class AdminApi
         if (body["enabled"] is JsonNode en) pc.Enabled = en.GetValue<bool>();
 
         // 探测要素（provider 级）：键不存在 = 保持现值；null/空串 = 清除（回落全局）；usageType 仅 1/2/null。
+        // 监控域名不可配：随渠道 baseURL 推导（ZhipuMonitorProbe.MonitorBase）。
         if (body.ContainsKey("organization")) pc.Organization = NullIfEmpty(body["organization"]?.ToString());
         if (body.ContainsKey("project")) pc.Project = NullIfEmpty(body["project"]?.ToString());
-        if (body.ContainsKey("monitorBase")) pc.MonitorBase = NullIfEmpty(body["monitorBase"]?.ToString());
         if (body.ContainsKey("usageType"))
         {
             if (body["usageType"] is { } utNode)
@@ -620,7 +619,6 @@ public sealed class AdminApi
         Organization = p.Organization,
         Project = p.Project,
         UsageType = p.UsageType,
-        MonitorBase = p.MonitorBase,
     };
 
     static JsonArray ProvidersArray(JsonObject relayRoot)

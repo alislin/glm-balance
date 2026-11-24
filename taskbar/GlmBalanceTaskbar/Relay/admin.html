@@ -227,11 +227,10 @@
       <span>apiKey</span><div class="row"><input type="text" id="pv-key" style="width:280px" placeholder="留空 = 复用全局读取链"><span class="muted" id="pv-key-hint"></span></div>
       <span>模型（逗号分隔）</span><input type="text" id="pv-models" style="width:340px">
       <span>启用</span><input type="checkbox" id="pv-enabled" checked>
-      <span style="grid-column:1/3;border-top:1px solid var(--line,#333);padding-top:8px;margin-top:4px"><b>用量探测要素（zhipu-monitor）</b><div class="muted">混合账号池：每渠道绑定自己的账号维度；留空 = 复用全局。组织/项目 ID 从官网用量统计页 F12 请求头 bigmodel-organization / bigmodel-project 复制。</div></span>
+      <span style="grid-column:1/3;border-top:1px solid var(--line,#333);padding-top:8px;margin-top:4px"><b>用量探测要素（zhipu-monitor）</b><div class="muted">混合账号池：每渠道绑定自己的账号维度；留空 = 复用全局。组织/项目 ID 从官网用量统计页 F12 请求头 bigmodel-organization / bigmodel-project 复制。监控域名随上方 baseURL 自动推导。</div></span>
       <span>组织 ID</span><input type="text" id="pv-org" placeholder="org-…（留空 = 复用全局）">
       <span>项目 ID</span><input type="text" id="pv-project" placeholder="proj_…（留空 = 复用全局）">
       <span>用量维度</span><div class="row"><select id="pv-usage-type"><option value="">自动（有组织=团队）</option><option value="1">个人版</option><option value="2">团队版</option></select></div>
-      <span>监控域名</span><input type="text" id="pv-monitor-base" placeholder="https://open.bigmodel.cn（留空 = 由 baseURL 推导）">
     </div>
     <div class="row" style="justify-content:flex-end;margin-top:12px">
       <button class="act" onclick="closeModal()">取消</button>
@@ -554,7 +553,6 @@ async function editProvider(id) {
   document.getElementById("pv-org").value = p.organization || "";
   document.getElementById("pv-project").value = p.project || "";
   document.getElementById("pv-usage-type").value = p.usageType != null ? String(p.usageType) : "";
-  document.getElementById("pv-monitor-base").value = p.monitorBase || "";
   document.getElementById("pv-modal").classList.remove("hidden");
 }
 
@@ -571,7 +569,6 @@ async function saveProvider() {
     organization: document.getElementById("pv-org").value.trim(),
     project: document.getElementById("pv-project").value.trim(),
     usageType: usageTypeVal === "" ? null : parseInt(usageTypeVal, 10),
-    monitorBase: document.getElementById("pv-monitor-base").value.trim(),
   };
   const key = document.getElementById("pv-key").value.trim();
   if (!_editing) body.id = document.getElementById("pv-id").value.trim();
