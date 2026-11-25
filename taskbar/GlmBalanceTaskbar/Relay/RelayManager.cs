@@ -353,6 +353,80 @@ public sealed class RelayManager : IDisposable
         var probe = ProbeRegistry.Resolve(rt.Config.Probe, _probeCtx);
         var result = await probe.ProbeAsync(rt.Config, ct).ConfigureAwait(false);
         rt.ApplyProbe(result, DateTimeOffset.Now);
+        // 探测产物落地（唯一数据面）：详情窗 Tab / 托盘 / 标题栏全部复用，不再独立请求
+        if (result.Snap != null)
+        {
+            StoreProviderSnap(rt.Id, result.Snap, result.Activity);
+            ProbeDataChanged?.Invoke(this, rt.Id);
+        }
+    }
+
+    // ─────────────────────── 探测产物快照（UI 复用，单点抓取） ───────────────────────
+
+    readonly object _snapLock = new();
+    readonly Dictionary<string, UsageSnapshot> _probeSnaps = new(StringComparer.Ordinal);
+    readonly Dictionary<string, ActivityInfo?> _probeActivities = new(StringComparer.Ordinal);
+
+    /// <summary>某渠道探测产物落地后触发（参数 = provider id）；UI 订阅刷新渲染（不做任何请求）。</summary>
+    public event EventHandler<string>? ProbeDataChanged;
+
+    void StoreProviderSnap(string id, UsageSnapshot snap, ActivityInfo? activity)
+    {
+        lock (_snapLock)
+        {
+            _probeSnaps[id] = snap;
+            _probeActivities[id] = activity;
+        }
+    }
+
+    /// <summary>读取渠道探测产物（无产物/非探测渠道 = null）。</summary>
+    public (UsageSnapshot? Snap, ActivityInfo? Activity) TryGetProviderSnap(string id)
+    {
+        lock (_snapLock)
+        {
+            return _probeSnaps.TryGetValue(id, out var s) ? (s, _probeActivities.TryGetValue(id, out var a) ? a : null) : (null, null);
+        }
+    }
+
+    /// <summary>全部探测产物（详情窗 Tab 集合与渲染取数）。</summary>
+    public IReadOnlyList<(string Id, UsageSnapshot Snap, ActivityInfo? Activity)> ProviderSnaps()
+    {
+        lock (_snapLock)
+        {
+            return _probeSnaps.Select(kv => (kv.Key, kv.Value, _probeActivities.GetValueOrDefault(kv.Key))).ToList();
+        }
+    }
+
+    /// <summary>渠道移除/停用探测时清理产物（Tab 集合随池收敛）。</summary>
+    public void DropProviderSnap(string id)
+    {
+        lock (_snapLock)
+        {
+            _probeSnaps.Remove(id);
+            _probeActivities.Remove(id);
+        }
+    }
+
+    /// <summary>
+    /// 手动刷新：立即重探指定渠道（null = 全部探测渠道）。产物落地经 ProbeDataChanged 通知 UI。
+    /// 探测失败同样落地（错误信息随快照可见）；不抛异常（调用方是 UI 线程）。
+    /// </summary>
+    public async Task ProbeNowAsync(string? providerId = null)
+    {
+        var targets = _router.Pool().Where(rt =>
+            string.Equals(rt.Config.Probe?.Trim(), "zhipu-monitor", StringComparison.OrdinalIgnoreCase) &&
+            (providerId == null || rt.Id == providerId)).ToList();
+        foreach (var rt in targets)
+        {
+            try
+            {
+                await ProbeOnceAsync(rt, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                /* 手动刷新失败：保留旧产物，错误经下轮探测收敛 */
+            }
+        }
     }
 
     /// <summary>AppContext.Apply() 后把最新快照喂给探测缓存。</summary>

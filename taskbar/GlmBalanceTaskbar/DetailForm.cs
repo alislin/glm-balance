@@ -53,6 +53,13 @@ sealed class DetailForm : Form
     readonly Button _btnExit;
     readonly Button _btnPanel;
 
+    // ── 用量视图 Tab 条（多渠道探测产物切换；AppContext.ApplyProbeMode 驱动） ──
+    readonly FlowLayoutPanel _tabPanel;
+    readonly List<Button> _tabButtons = new();
+    readonly List<string> _tabIds = new();
+    string? _tabSelectedId;
+    bool _tabPctOnly;
+
     readonly Label _lblRelayHeader;
     readonly Label[] _lblRelayRows;
     readonly Label _lblRelayHint;
@@ -84,6 +91,9 @@ sealed class DetailForm : Form
 
     /// <summary>用户点击"立即刷新"。</summary>
     public event EventHandler? RefreshRequested;
+
+    /// <summary>用户点击用量视图 Tab（参数 = provider id；再次点击当前 Tab = 恢复跟随激活通道）。</summary>
+    public event EventHandler<string>? ProviderViewSwitched;
 
     /// <summary>用户点击"管理面板"。</summary>
     public event EventHandler? PanelRequested;
@@ -204,6 +214,17 @@ sealed class DetailForm : Form
         _btnExit.Click += (_, _) => RequestExit();
         Controls.Add(_btnExit);
 
+        // 用量视图 Tab 条（多渠道探测产物；单渠道/无探测渠道隐藏不占位）
+        _tabPanel = new FlowLayoutPanel
+        {
+            Location = new Point(PageMargin, 0),
+            Size = new Size(W - PageMargin * 2, 26),
+            BackColor = Colors.Bg,
+            Margin = Padding.Empty,
+            WrapContents = false,
+        };
+        Controls.Add(_tabPanel);
+
         // 数据区块初始全部隐藏：加载中只显示标题，首刷后填充
         _lblError.Visible = false;
         _lblWarn.Visible = false;
@@ -223,6 +244,7 @@ sealed class DetailForm : Form
         _sections = new List<Section>
         {
             new() { Rows = { Rw(26, _lblTitle, _lblLevel) } },
+            TabSection(),
             new() { Rows = { Rw(44, _lblError) } },
             new() { Rows = { new Row { Controls = new Control[] { _lblWarn }, Height = () => _lblWarn.Height } } },
             new() { Rows = { Rw(24, _lbl5h, _lbl5hPct), Rw(12, _bar5h), Rw(20, _lbl5hDetail) } },
@@ -287,6 +309,76 @@ sealed class DetailForm : Form
         s.Rows.Add(new Row { Controls = new Control[] { _chkRunAtLogon! }, Height = () => 24 });
         s.Rows.Add(new Row { Controls = new Control[] { _lblAutostartNote! }, Height = () => 20 });
         return s;
+    }
+
+    /// <summary>用量视图 Tab 区块（多渠道时显示；单渠道/无探测渠道隐藏不占位）。</summary>
+    Section TabSection()
+    {
+        var s = new Section();
+        s.Rows.Add(new Row
+        {
+            Controls = new Control[] { _tabPanel },
+            Height = () => _tabPanel.Visible ? _tabPanel.Height : 0,
+        });
+        return s;
+    }
+
+    /// <summary>
+    /// 更新用量视图 Tab 条（AppContext.ApplyProbeMode 每次渲染驱动）。
+    /// 渠道集合变化时重建按钮；≤1 个 Tab 隐藏整条。选中 Tab 加粗高亮；当前激活通道前缀 ▶。
+    /// pctOnly（委托态）：Tab 尾注「仅百分比」提示明细不可得。
+    /// </summary>
+    public void UpdateProviderTabs(IReadOnlyList<(string Id, string Label)> tabs, string? selectedId, bool pctOnly)
+    {
+        var ids = tabs.Select(t => t.Id).ToList();
+        var rebuild = !ids.SequenceEqual(_tabIds);
+        if (rebuild)
+        {
+            _tabPanel.SuspendLayout();
+            foreach (var b in _tabButtons)
+            {
+                _tabPanel.Controls.Remove(b);
+                b.Dispose();
+            }
+            _tabButtons.Clear();
+            _tabIds.Clear();
+            foreach (var (id, _) in tabs)
+            {
+                var captured = id;
+                var btn = new Button
+                {
+                    Text = id,
+                    AutoSize = true,
+                    FlatStyle = FlatStyle.Flat,
+                    Margin = new Padding(0, 0, 6, 0),
+                    Font = RelayRowFont,
+                    Cursor = Cursors.Hand,
+                };
+                btn.FlatAppearance.BorderSize = 1;
+                btn.FlatAppearance.BorderColor = Colors.Muted;
+                btn.Click += (_, _) => ProviderViewSwitched?.Invoke(this, captured);
+                _tabPanel.Controls.Add(btn);
+                _tabButtons.Add(btn);
+                _tabIds.Add(id);
+            }
+            _tabPanel.ResumeLayout();
+        }
+        _tabSelectedId = selectedId;
+        _tabPctOnly = pctOnly;
+        for (var i = 0; i < _tabButtons.Count; i++)
+        {
+            var id = _tabIds[i];
+            var label = tabs.FirstOrDefault(t => t.Id == id).Label ?? id;
+            var selected = id == selectedId;
+            var btn = _tabButtons[i];
+            btn.Text = pctOnly && selected ? label + "（仅百分比）" : label;
+            btn.Font = selected ? RelayRowCurrentFont : RelayRowFont;
+            btn.BackColor = selected ? Colors.Success : Colors.Bg;
+            btn.ForeColor = selected ? Color.White : Colors.Text;
+            btn.FlatAppearance.MouseOverBackColor = selected ? Colors.Success : Colors.Bg;
+        }
+        _tabPanel.Visible = tabs.Count > 1;
+        Relayout();
     }
 
     /// <summary>渠道行状态文本；返回 (文本, 颜色, 是否当前通道高亮)。

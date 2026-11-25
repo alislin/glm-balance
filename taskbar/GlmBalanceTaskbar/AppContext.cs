@@ -43,7 +43,7 @@ sealed class AppContext : ApplicationContext
         MainForm = _form;
         // dev 双实例消歧：窗口标题（托盘 tooltip）加 [DEV] 前缀（AUMID 已分离，任务栏独立身份）
         if (DevMode.IsDev) _form.Text = "[DEV] " + _form.Text;
-        _form.RefreshRequested += (_, _) => _ = RefreshAsync(force: true);
+        _form.RefreshRequested += (_, _) => _ = ManualRefreshAsync();
         _form.PanelRequested += (_, _) => OpenAdminPanel();
         _form.RelayToggleRequested += (_, _) => _ = ToggleRelayAsync();
         // sticky pin 强制通道：托盘右键菜单外派 → 路由器置/清 pin → 立即刷新详情窗中转分组
@@ -56,6 +56,8 @@ sealed class AppContext : ApplicationContext
             else relay.Router.ClearForced(e.ProviderId);
             _form.UpdateRelay(relay.Snapshot());
         };
+        // 详情窗 Tab 切换（用户手动选择用量视图；AppContext 只记 id 并重渲，零请求）
+        _form.ProviderViewSwitched += (_, id) => SelectProviderView(id);
 
         // 自启动分组（G2/§2.5）：注册/注销（提权子命令流，S1）与 HKCU Run 副开关接线
         _form.AutostartToggleRequested += (_, _) => _ = ToggleAutostartAsync();
@@ -107,6 +109,7 @@ sealed class AppContext : ApplicationContext
             }
         }
         _relay = relay;
+        AttachProbeListener(relay); // 探测产物落地 → 重渲（构造与 S5 回退重建后各挂一次）
         _form.SetWarnings(cfg.Warnings); // M4：启动期警告（含 relay 启动失败）在详情窗可见
 
         // 委托态 UI：禁用 relay 开关与 pin 菜单 + 提示文案（须在 UpdateRelay 首刷前设置）
@@ -122,7 +125,7 @@ sealed class AppContext : ApplicationContext
         };
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开详情", null, (_, _) => ShowMainWindow());
-        menu.Items.Add("立即刷新", null, (_, _) => _ = RefreshAsync(force: true));
+        menu.Items.Add("立即刷新", null, (_, _) => _ = ManualRefreshAsync());
         menu.Items.Add("管理面板", null, (_, _) => OpenAdminPanel());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出", null, (_, _) => _form.RequestExit());
@@ -459,7 +462,41 @@ sealed class AppContext : ApplicationContext
     {        if (Interlocked.CompareExchange(ref _busy, 1, 0) != 0) return;
         try
         {
-            // 活跃度独立节流（失败时立即重试，与插件一致）
+            // 委托态：随既有 30s 刷新节流一并重取 /status（§2.4；连续失败 N 次回退，S5）
+            if (_delegated != null)
+            {
+                await RefreshDelegatedStatusAsync().ConfigureAwait(true);
+            }
+
+            // 数据面分流：有探测产物 → 复用（探测是唯一数据面，零独立请求）；
+            // 无探测渠道（或 relay 未运行）→ 全局链单视图（现状）。
+            // 委托态：远端 /status 只有 pct → Tab 降级为仅百分比（明细/活跃度不可得）。
+            var localSnaps = _relay is { Running: true } r ? r.ProviderSnaps() : null;
+            var delegatedProbes = _delegatedStatus is { Running: true } st
+                ? st.Providers.Where(p => p.Enabled && IsZhipuProbe(p.Probe)).OrderBy(p => p.Priority).ToList()
+                : null;
+
+            if (localSnaps is { Count: > 0 })
+            {
+                var defaultId = DefaultProbeViewId(localSnaps, _relay!.Router.Current(DateTimeOffset.Now)?.Id);
+                var viewId = ResolveViewId(localSnaps, defaultId);
+                var view = localSnaps.First(x => x.Id == viewId);
+                var tabs = TabList(localSnaps.Select(x => (x.Id, x.Snap)).ToList(), _relay.Router.Current(DateTimeOffset.Now)?.Id);
+                ApplyProbeMode(tabs, viewId, view.Snap, defaultId is null ? null : localSnaps.FirstOrDefault(x => x.Id == defaultId).Snap, pctOnly: false);
+                return;
+            }
+            if (delegatedProbes is { Count: > 0 })
+            {
+                var snaps = delegatedProbes.Select(p => (p.Id, PctSnapshot(p))).ToList();
+                var defaultId = DefaultProbeViewIdDelegated(snaps, _delegatedStatus!.CurrentId);
+                var viewId = ResolveViewIdDelegated(snaps, defaultId);
+                var view = snaps.First(x => x.Id == viewId);
+                var tabs = TabList(snaps, _delegatedStatus!.CurrentId);
+                ApplyProbeMode(tabs, viewId, view.Item2, defaultId is null ? null : snaps.FirstOrDefault(x => x.Id == defaultId).Item2, pctOnly: true);
+                return;
+            }
+
+            // 无探测渠道：活跃度独立节流（失败时立即重试，与插件一致）
             if (_cfg.Activity && (force || DateTimeOffset.Now - _lastActivityFetch >= TimeSpan.FromMilliseconds(ActivityTtlMs)))
             {
                 _lastActivityFetch = DateTimeOffset.Now;
@@ -468,14 +505,9 @@ sealed class AppContext : ApplicationContext
                 else _lastActivityFetch = DateTimeOffset.MinValue;
             }
 
-            var snap = await _client.FetchUsageAsync().ConfigureAwait(true);
-            snap.Activity = _activity;
-            // 委托态：随既有 30s 刷新节流一并重取 /status（§2.4；连续失败 N 次回退，S5）
-            if (_delegated != null)
-            {
-                await RefreshDelegatedStatusAsync().ConfigureAwait(true);
-            }
-            Apply(snap);
+            var fallbackSnap = await _client.FetchUsageAsync().ConfigureAwait(true);
+            fallbackSnap.Activity = _activity;
+            Apply(fallbackSnap);
         }
         catch (Exception ex)
         {
@@ -485,6 +517,134 @@ sealed class AppContext : ApplicationContext
         {
             Interlocked.Exchange(ref _busy, 0);
         }
+    }
+
+    // ─────────────────── 多渠道用量视图（复用探测产物） ───────────────────
+
+    /// <summary>用户手动选择的 Tab（provider id）；null = 未手动选择（跟随激活通道）。</summary>
+    string? _userViewId;
+
+    static bool IsZhipuProbe(string? probe) =>
+        string.Equals(probe?.Trim(), "zhipu-monitor", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>委托态 pct-only 快照：远端 /status 只有剩余百分比，无明细/重置时间/活跃度。</summary>
+    static UsageSnapshot PctSnapshot(ProviderStatus p)
+    {
+        if (p.LastError is { } err && p.FiveHourPct == null && p.WeekPct == null)
+        {
+            return new UsageSnapshot { Error = err };
+        }
+        var s = new UsageSnapshot
+        {
+            FetchedAt = p.LastProbeAt ?? DateTimeOffset.Now,
+            FiveHour = p.FiveHourPct is int fh ? new LimitInfo("5h", fh, null, null, null) : null,
+            Week = p.WeekPct is int wk ? new LimitInfo(p.SourceLabel ?? "周积分", wk, null, null, null) : null,
+        };
+        return s;
+    }
+
+    /// <summary>Tab 集合：探测渠道按优先级排序；当前激活通道带 ▶ 标记（Tab 文本里体现）。</summary>
+    List<(string Id, string Label)> TabList(IReadOnlyList<(string Id, UsageSnapshot Snap)> snaps, string? currentId)
+    {
+        var order = _relay?.Options.Providers.ToDictionary(p => p.Id, p => p.Priority);
+        return snaps
+            .OrderBy(x => order?.GetValueOrDefault(x.Id) ?? int.MaxValue)
+            .Select(x => (x.Id, x.Id == currentId ? "▶ " + x.Id : x.Id))
+            .ToList();
+    }
+
+    string? ResolveViewId(IReadOnlyList<(string Id, UsageSnapshot Snap, ActivityInfo? Activity)> snaps, string? defaultId) =>
+        _userViewId is { } uid && snaps.Any(x => x.Id == uid) ? uid : defaultId;
+
+    string? ResolveViewIdDelegated(IReadOnlyList<(string Id, UsageSnapshot Snap)> snaps, string? defaultId) =>
+        _userViewId is { } uid && snaps.Any(x => x.Id == uid) ? uid : defaultId;
+
+    /// <summary>默认视图（本地）：relay 当前激活通道是探测渠道 → 它；否则最高优先级探测渠道。</summary>
+    string? DefaultProbeViewId(IReadOnlyList<(string Id, UsageSnapshot Snap, ActivityInfo? Activity)> snaps, string? currentId)
+    {
+        if (currentId != null && snaps.Any(x => x.Id == currentId)) return currentId;
+        var order = _relay?.Options.Providers.ToDictionary(p => p.Id, p => p.Priority);
+        return snaps
+            .OrderBy(x => order?.GetValueOrDefault(x.Id) ?? int.MaxValue)
+            .Select(x => (string?)x.Id)
+            .FirstOrDefault();
+    }
+
+    /// <summary>默认视图（委托态）：当前激活通道是探测渠道 → 它；否则远端优先级最高的探测渠道。</summary>
+    string? DefaultProbeViewIdDelegated(IReadOnlyList<(string Id, UsageSnapshot Snap)> snaps, string? currentId)
+    {
+        if (currentId != null && snaps.Any(x => x.Id == currentId)) return currentId;
+        var order = _delegatedStatus?.Providers.ToDictionary(p => p.Id, p => p.Priority);
+        return snaps
+            .OrderBy(x => order?.GetValueOrDefault(x.Id) ?? int.MaxValue)
+            .Select(x => (string?)x.Id)
+            .FirstOrDefault();
+    }
+
+    /// <summary>探测产物模式渲染：面板显示用户所选视图；标题栏/托盘/图标固定跟随默认视图（激活通道）。</summary>
+    void ApplyProbeMode(
+        IReadOnlyList<(string Id, string Label)> tabs,
+        string? viewId,
+        UsageSnapshot viewSnap,
+        UsageSnapshot? defaultSnap,
+        bool pctOnly)
+    {
+        try
+        {
+            _lastSnap = defaultSnap ?? viewSnap; // 托盘浮窗数据源 = 默认视图
+            _form.UpdateProviderTabs(tabs, viewId, pctOnly);
+            _form.UpdateData(viewSnap);
+            if (defaultSnap != null) RenderTitleIcon(defaultSnap);
+            _form.UpdateRelay(_delegated != null ? _delegatedStatus : _relay?.Snapshot());
+        }
+        catch (Exception ex)
+        {
+            try { _form.Text = "GLM: " + ex.Message; } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>详情窗 Tab 切换（用户手动选择；再次点击同 Tab = 恢复跟随激活通道）。</summary>
+    public void SelectProviderView(string? providerId)
+    {
+        _userViewId = _userViewId == providerId ? null : providerId;
+        _ = RefreshAsync();
+    }
+
+    /// <summary>挂接探测产物监听（构造与 S5 回退重建 relay 后调用；旧实例事件随 GC 失效）。</summary>
+    void AttachProbeListener(RelayManager relay)
+    {
+        relay.ProbeDataChanged -= OnProbeDataChanged;
+        relay.ProbeDataChanged += OnProbeDataChanged;
+    }
+
+    void OnProbeDataChanged(object? sender, string providerId)
+    {
+        try
+        {
+            if (_form.IsDisposed) return;
+            _form.BeginInvoke(() => _ = RefreshAsync());
+        }
+        catch
+        {
+            /* 窗口句柄回收中：下一次 30s 轮询兜底 */
+        }
+    }
+
+    /// <summary>手动刷新：委托态重拉 /status；本地探测模式立即重探全部探测渠道；否则主循环强制刷新。</summary>
+    public async Task ManualRefreshAsync()
+    {
+        if (_delegated != null)
+        {
+            await RefreshAsync(force: true).ConfigureAwait(true);
+            return;
+        }
+        if (_relay is { Running: true } relay && relay.ProviderSnaps().Count > 0)
+        {
+            await relay.ProbeNowAsync().ConfigureAwait(true);
+            await RefreshAsync().ConfigureAwait(true);
+            return;
+        }
+        await RefreshAsync(force: true).ConfigureAwait(true);
     }
 
     // ─────────────────────────── 委托态（G3/§2.4/§5 S1·S4·S5） ───────────────────────────
@@ -542,6 +702,7 @@ sealed class AppContext : ApplicationContext
             }
             var old = _relay;
             _relay = relay;
+            AttachProbeListener(relay); // 重建后重挂探测产物监听
             _cfg = fresh; // A-F1：回退后全局同步新配置（旧引用仅 _client 持有，轮询语义不变）
             old?.Dispose();
             if (warnings.Count > 0)
@@ -604,37 +765,15 @@ sealed class AppContext : ApplicationContext
         return false;
     }
 
+    /// <summary>全局链单视图渲染（无探测渠道的兜底路径）。</summary>
     void Apply(UsageSnapshot s)
     {
         _lastSnap = s;
         try
         {
-            // 最新快照喂给中转探测缓存（ZhipuMonitorProbe 优先复用）
+            // 全局快照喂给中转探测缓存（--once/dev 注入链的运行时对应路径；探测渠道存在时不走此处）
             _relay?.FeedSnapshot(s);
-
-            if (s.Error != null)
-            {
-                _form.Text = $"{(DevMode.IsDev ? "[DEV] " : "")}GLM: {s.Error}";
-                SetIcon(IconRenderer.RenderTextIcon("?", Color.Gray));
-                TaskbarProgress.Clear(_form.Handle);
-            }
-            else if ((s.Week ?? s.FiveHour ?? s.Mcp) is { Remaining: int r } main)
-            {
-                var tag = s.Week != null ? "周" : s.FiveHour != null ? "5h" : "MCP";
-                var title = $"{(DevMode.IsDev ? "[DEV] " : "")}GLM {tag} {r}%";
-                if (main.Detail != null) title += $" · {main.DetailLabel ?? "已用"} {main.Detail}";
-                if (main.ResetLabel != null) title += $" · ↻ {main.ResetLabel}";
-                _form.Text = title;
-                // 多分辨率图标：每帧原生渲染，标题栏 16px / 任务栏 24-32px 都不缩放丢笔画
-                SetIcon(IconRenderer.RenderTextIcon(r.ToString(CultureInfo.InvariantCulture), Colors.ForRemaining(r)));
-                TaskbarProgress.SetValue(_form.Handle, (ulong)Math.Clamp(r, 0, 100), 100);
-            }
-            else
-            {
-                _form.Text = $"{(DevMode.IsDev ? "[DEV] " : "")}GLM 用量 · 暂无配额数据";
-                SetIcon(IconRenderer.RenderTextIcon("–", Color.Gray));
-                TaskbarProgress.Clear(_form.Handle);
-            }
+            RenderTitleIcon(s);
             _form.UpdateData(s);
             // 委托态渲染远端快照（渲染代码零改动，§2.4）；非委托态走本地三态快照
             _form.UpdateRelay(_delegated != null ? _delegatedStatus : _relay?.Snapshot());
@@ -642,6 +781,34 @@ sealed class AppContext : ApplicationContext
         catch (Exception ex)
         {
             try { _form.Text = "GLM: " + ex.Message; } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>标题栏文字 / 托盘图标 / 任务栏进度条（多渠道模式下固定跟随默认视图）。</summary>
+    void RenderTitleIcon(UsageSnapshot s)
+    {
+        if (s.Error != null)
+        {
+            _form.Text = $"{(DevMode.IsDev ? "[DEV] " : "")}GLM: {s.Error}";
+            SetIcon(IconRenderer.RenderTextIcon("?", Color.Gray));
+            TaskbarProgress.Clear(_form.Handle);
+        }
+        else if ((s.Week ?? s.FiveHour ?? s.Mcp) is { Remaining: int r } main)
+        {
+            var tag = s.Week != null ? "周" : s.FiveHour != null ? "5h" : "MCP";
+            var title = $"{(DevMode.IsDev ? "[DEV] " : "")}GLM {tag} {r}%";
+            if (main.Detail != null) title += $" · {main.DetailLabel ?? "已用"} {main.Detail}";
+            if (main.ResetLabel != null) title += $" · ↻ {main.ResetLabel}";
+            _form.Text = title;
+            // 多分辨率图标：每帧原生渲染，标题栏 16px / 任务栏 24-32px 都不缩放丢笔画
+            SetIcon(IconRenderer.RenderTextIcon(r.ToString(CultureInfo.InvariantCulture), Colors.ForRemaining(r)));
+            TaskbarProgress.SetValue(_form.Handle, (ulong)Math.Clamp(r, 0, 100), 100);
+        }
+        else
+        {
+            _form.Text = $"{(DevMode.IsDev ? "[DEV] " : "")}GLM 用量 · 暂无配额数据";
+            SetIcon(IconRenderer.RenderTextIcon("–", Color.Gray));
+            TaskbarProgress.Clear(_form.Handle);
         }
     }
 
@@ -653,12 +820,33 @@ sealed class AppContext : ApplicationContext
         try
         {
             _trayPreview ??= new TrayPreviewForm();
-            _trayPreview.ShowPreview(PreviewTitle(s), PreviewBody(s, RelayLine()), Cursor.Position);
+            _trayPreview.ShowPreview(PreviewTitle(s), PreviewBody(s, RelayLine(), ProbeChannelLines()), Cursor.Position);
         }
         catch
         {
             /* ignore */
         }
+    }
+
+    /// <summary>托盘浮窗的多探测渠道摘要行（每渠道一行：id + 各窗口剩余；单探测渠道 = null 走原明细展示）。</summary>
+    string? ProbeChannelLines()
+    {
+        var snaps = _relay is { Running: true } r ? r.ProviderSnaps() : null;
+        if (snaps is not { Count: > 1 }) return null;
+        var currentId = _relay!.Router.Current(DateTimeOffset.Now)?.Id;
+        var order = _relay.Options.Providers.ToDictionary(p => p.Id, p => (int?)p.Priority);
+        var lines = snaps
+            .OrderBy(x => order.GetValueOrDefault(x.Id) ?? int.MaxValue)
+            .Select(x =>
+            {
+                var mark = x.Id == currentId ? "▶ " : "  ";
+                var parts = new List<string>();
+                if (x.Snap.Week?.Remaining is int wk) parts.Add($"{x.Snap.Week.Label ?? "周"} {wk}%");
+                if (x.Snap.FiveHour?.Remaining is int fh) parts.Add($"5h {fh}%");
+                var pct = parts.Count > 0 ? " · " + string.Join(" · ", parts) : "";
+                return $"{mark}{x.Id}{pct}";
+            });
+        return string.Join("\n", lines);
     }
 
     /// <summary>托盘悬停的"中转"行；仅中转运行时显示，其余状态（未初始化/显式关闭）与旧版无 relay 行为一致。
@@ -723,10 +911,11 @@ sealed class AppContext : ApplicationContext
     static string PreviewTitle(UsageSnapshot s) =>
         $"GLM 用量{(s.Level != null ? $"  [{s.Level}]" : "")}";
 
-    static string PreviewBody(UsageSnapshot s, string? relayLine)
+    static string PreviewBody(UsageSnapshot s, string? relayLine, string? probeLines = null)
     {
         if (s.Error != null) return s.Error;
         var lines = new List<string>();
+        if (probeLines != null) lines.Add(probeLines.TrimEnd());
         if (DetailForm.LimitLine(s.Week, "周积分") is { } week) lines.Add(week);
         if (DetailForm.LimitLine(s.FiveHour, "5h 积分") is { } five) lines.Add(five);
         if (s.Activity is { } a)

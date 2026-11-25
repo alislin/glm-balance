@@ -1,10 +1,10 @@
 namespace GlmBalanceTaskbar;
 
 /// <summary>
-/// 智谱监控探测：quota/limit（复用 GlmApiClient）。
-/// 数据源优化：优先复用 RelayManager 喂入的 AppContext 最新 UsageSnapshot
-/// （距抓取时刻 &lt; probeIntervalSeconds + 10s 视为新鲜，直接取窗口剩余），
-/// 过期才自行请求。窗口语义与 QuotaParser 对齐（unit=3 → 5h、unit=6 → 周）。
+/// 智谱监控探测：quota/limit + 活跃度（复用 GlmApiClient）。
+/// 探测是唯一数据面：ProbeResult 携带完整 UsageSnapshot / ActivityInfo，
+/// 详情窗 Tab、托盘浮窗、标题栏全部复用探测产物，不做独立请求（除非手动刷新）。
+/// 窗口语义与 QuotaParser 对齐（unit=3 → 5h、unit=6 → 周）。
 /// </summary>
 public sealed class ZhipuMonitorProbe : IUsageProbe
 {
@@ -14,21 +14,19 @@ public sealed class ZhipuMonitorProbe : IUsageProbe
 
     public string Type => "zhipu-monitor";
 
+    /// <summary>活跃度 TTL（毫秒），与插件 ACTIVITY_TTL 一致。</summary>
+    public const int ActivityTtlMs = 300_000;
+
     public async Task<ProbeResult> ProbeAsync(ProviderConfig p, CancellationToken ct)
     {
-        // 1) 复用 AppContext 快照（30s 配额轮询的最新结果）。
-        //    守卫：仅 provider 无任何探测要素覆盖（org/project/type/monitorBase）时才可复用——
-        //    混合账号池下全局快照属于全局链账号，provider 自带要素 = 不同账号维度，不可冒用。
-        if (!p.HasProbeOverrides)
+        // --once/dev 注入快照（AppContext 主面板不再喂快照；仅评估模式用）
+        var injected = _ctx.SnapshotProvider();
+        if (injected is { Error: null } && DateTimeOffset.Now - injected.FetchedAt < TimeSpan.FromSeconds(_ctx.FreshSeconds()))
         {
-            var snap = _ctx.SnapshotProvider();
-            if (snap is { Error: null } && DateTimeOffset.Now - snap.FetchedAt < TimeSpan.FromSeconds(_ctx.FreshSeconds()))
-            {
-                return Pick(snap);
-            }
+            return Pick(injected);
         }
 
-        // 2) 过期/缺失 → 自行请求（要素逐项 provider 优先，null 回落全局；与 key 的 ?? 模式一致）
+        // 要素逐项 provider 优先，null 回落全局；与 key 的 ?? 模式一致
         var key = NonEmpty(p.ApiKey) ?? _ctx.Global.ApiKey;
         if (key == null)
         {
@@ -43,7 +41,7 @@ public sealed class ZhipuMonitorProbe : IUsageProbe
             Project = NonEmpty(p.Project) ?? _ctx.Global.Project,
             // usageType：provider 显式（1/2）优先；null = 自动，按解析后的组织归属推导（有 org → 2）
             UsageType = p.UsageType ?? ((NonEmpty(p.Organization) ?? _ctx.Global.Organization) != null ? 2 : null),
-            Activity = false,
+            Activity = true, // 活跃度在探测内完成（TTL 内复用缓存，不重复请求）
         };
         using var client = new GlmApiClient(probeCfg);
         var fresh = await client.FetchUsageAsync(ct).ConfigureAwait(false);
@@ -51,12 +49,38 @@ public sealed class ZhipuMonitorProbe : IUsageProbe
         {
             return new ProbeResult(false, null, null, fresh.Error);
         }
+
+        // 活跃度：TTL 内复用缓存（零请求）；过期才抓；失败保留旧值（手动刷新经 force=true 强制重抓）
+        var activity = await GetActivityAsync(p, client, ct, force: ct == CancellationToken.None).ConfigureAwait(false);
+        fresh.Activity = activity;
         return Pick(fresh);
     }
 
+    /// <summary>活跃度按渠道获取：缓存新鲜 → 直接返回；过期/缺失 → 抓取并落缓存；失败 → 旧值兜底（无旧值 = null）。
+    /// 缓存挂在 ProbeContext（Resolve 每轮新建探测实例，实例字段无法跨轮命中）。手动刷新跳过缓存强制重抓。</summary>
+    async Task<ActivityInfo?> GetActivityAsync(ProviderConfig p, GlmApiClient client, CancellationToken ct, bool force = false)
+    {
+        var now = DateTimeOffset.Now;
+        if (!force && _ctx.ActivityCache.TryGetValue(p.Id, out var c) && now - c.FetchedAt < TimeSpan.FromMilliseconds(ActivityTtlMs))
+        {
+            return c.Info;
+        }
+        var act = await client.FetchActivityAsync(ct).ConfigureAwait(false);
+        if (act != null)
+        {
+            _ctx.ActivityCache[p.Id] = (act, now);
+            return act;
+        }
+        // 抓取失败：返回过期旧值兜底（下轮探测重试）
+        return _ctx.ActivityCache.TryGetValue(p.Id, out var old) ? old.Info : null;
+    }
+
+    /// <summary>渠道配置变更（要素重绑定/跨账号）后失效活跃度缓存，避免串数据。</summary>
+    public static void InvalidateActivity(ProbeContext ctx, string providerId) => ctx.ActivityCache.TryRemove(providerId, out _);
+
     /// <summary>取 5h / 周窗口剩余的较小者（先耗尽的窗口决定可用性），并标注来源；
-    /// 两窗口剩余分别给出（admin 总览分条展示）。</summary>
-    static ProbeResult Pick(UsageSnapshot s)
+    /// 完整快照随 ProbeResult 交付（详情窗/托盘复用）。</summary>
+    ProbeResult Pick(UsageSnapshot s)
     {
         int? best = null;
         string? label = null;
@@ -72,7 +96,8 @@ public sealed class ZhipuMonitorProbe : IUsageProbe
         }
         return new ProbeResult(true, best, null, null, label,
             FiveHourPct: s.FiveHour?.Remaining,
-            WeekPct: s.Week?.Remaining);
+            WeekPct: s.Week?.Remaining,
+            Snap: s);
     }
 
     string MonitorBase(ProviderConfig p)
