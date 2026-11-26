@@ -23,7 +23,7 @@
 | --- | --- |
 | exe 同目录 `glmbalance-taskbar.json` | 覆盖任意字段（见下表） |
 | `~/.local/share/opencode/auth.json` | API key（同插件 e2e-check，条目名含 zhipu/bigmodel/z.ai，优先 `zhipuai-coding-plan`） |
-| `~/.config/opencode/opencode.json` | provider 的 apiKey / baseURL |
+| `~/.config/opencode/opencode.json(.jsonc)` | provider 的 apiKey / baseURL（jsonc 优先：opencode 并存时合并且 jsonc 覆盖 json） |
 | `~/.config/opencode/tui.json` | glm-balance 插件条目的 organization / project 等选项（同插件 deploy 配置） |
 
 `glmbalance-taskbar.json` 字段：
@@ -177,6 +177,52 @@ opencode (localrelay provider) ──http://127.0.0.1:8787/v1──▶ GlmBalanc
 - 失败转移仅发生在未向客户端写入任何字节前；429/402/403/5xx/网络异常切下一渠道，4xx 业务错原样回传不转移；全部渠道失败 → `502` 错误汇总。
 - 流式（SSE）逐块转发 + flush，idle 120s 无 chunk 才断（断流不重试）。
 
+## CLI 命令行控制
+
+exe 内置 CLI 子命令（直连运行实例的管理 API，`127.0.0.1:relay.port`，Bearer localToken；token/端口自动取自配置文件）：
+
+```sh
+# 查询类
+GlmBalanceTaskbar.exe status              # 运行态 + 渠道状态表（--json 输出 JSON）
+GlmBalanceTaskbar.exe health              # 探活（不可达 → 退出码 2）
+GlmBalanceTaskbar.exe logs --tail 100     # 请求日志
+GlmBalanceTaskbar.exe discover            # 发现 opencode/Pi 配置中的可用渠道
+
+# 服务控制
+GlmBalanceTaskbar.exe relay on|off        # 中转启停
+GlmBalanceTaskbar.exe relay show          # 查看运行参数
+GlmBalanceTaskbar.exe relay set --degrade-below 8 --restore-above 12
+GlmBalanceTaskbar.exe relay reset-token   # 重置 localToken（需重新部署 opencode 端）
+GlmBalanceTaskbar.exe shutdown            # 停止 headless 后台进程（UI 实例 403）
+
+# 渠道管理
+GlmBalanceTaskbar.exe channel list
+GlmBalanceTaskbar.exe channel show <id>
+GlmBalanceTaskbar.exe channel add <id> --baseURL https://x/v1 --apiKey sk-xxx --models glm-5.3,glm-5.3-flash
+GlmBalanceTaskbar.exe channel set <id> --enabled false
+GlmBalanceTaskbar.exe channel remove <id>
+GlmBalanceTaskbar.exe channel enable|disable <id>
+GlmBalanceTaskbar.exe channel test <id>
+GlmBalanceTaskbar.exe channel move <id> up|down
+GlmBalanceTaskbar.exe channel reorder <id1> <id2> ...   # 恰好覆盖全部 id
+GlmBalanceTaskbar.exe channel pin <id> / channel unpin <id>   # 强制通道
+GlmBalanceTaskbar.exe channel import [id...]            # 从发现列表导入（无参=全部候选）
+
+# 发现与部署
+GlmBalanceTaskbar.exe deploy opencode --dry-run
+GlmBalanceTaskbar.exe deploy opencode --set-default
+
+# 开机任务 / 初始化
+GlmBalanceTaskbar.exe task status|register|unregister
+GlmBalanceTaskbar.exe init <dir>          # 等价 --relay-init <dir>
+```
+
+全局选项：`--json`（JSON 输出）、`--dev`（操作 dev 实例，端口 8788）、`--port <n>`（覆盖目标端口）、`--config-dir <p>`（key 链 profile 根）。
+
+帮助：`help`（总览）、`help <分组>`（如 `help channel`）、`help <命令>` / `<命令> --help`（如 `help channel add`）。退出码：0=成功 1=失败 2=实例不可达 3=用法错误。
+
+既有进程级参数（`--once` / `--relay-init` / `--headless` / `--task-*` / `--dev` / `--dump-icon`）保持不变；`--dev` 修饰子命令仅切换目标实例，不触发 dev 硬禁（硬禁仍针对 `--headless`/`--task-*` 组合）。
+
 ### HTTP 端点
 
 | 端点 | 鉴权 | 说明 |
@@ -218,7 +264,7 @@ ESC 取消回滚）；总览顶部横幅在强制通道不可用时给出原因�
 ### opencode 对接
 
 1. 启动程序后打开管理面板（托盘菜单「管理面板」或 `http://127.0.0.1:8787/admin`），在「部署」Tab 生成预览并写入；或在「Provider 池」Tab 从发现列表核对渠道。
-2. 写入效果（`~/.config/opencode/opencode.json`，自动备份 `opencode.json.bak-<时间戳>`，**绝不改动既有 provider 条目**）：
+2. 写入效果（`~/.config/opencode/opencode.json(.jsonc)`，jsonc 优先；两文件都存在时写 jsonc——opencode 合并语义中 jsonc 覆盖 json。自动备份 `*.bak-<时间戳>`，**绝不改动既有 provider 条目**；两文件都不存在时部署自动创建 `opencode.jsonc`）：
 
 ```jsonc
 {
@@ -299,7 +345,7 @@ headless 进程行为要点：
 ### 红线说明
 
 - apiKey 只写不读：任何 API 响应、`/status`、日志中 key 一律掩码（`sk-…后4位`）；不把明文 key 写进 git 仓库内任何文件。
-- 发现/部署功能**绝不删除或修改** opencode.json 中既有 provider 条目（本地 opencode.json 的既有 provider 条目是插件与 relay 取 key 的共同数据源）。
+- 发现/部署功能**绝不删除或修改** opencode.json(.jsonc) 中既有 provider 条目（本地 opencode 配置的既有 provider 条目是插件与 relay 取 key 的共同数据源）。
 - 配置写回只有一条路径（JsonNode 合并写回 `glmbalance-taskbar.json`，保留文件其他字段）。
 - 中转仅监听本机回环；日志与错误汇总不含请求体内容。
 

@@ -46,7 +46,7 @@ public sealed class AppConfig
     /// 配置来源（优先级从高到低）：
     /// 1. <paramref name="configDir"/>（null = 现状：exe 同目录；--dev 传 DevMode.ConfigRoot）下的 glmbalance-taskbar.json
     /// 2. ~/.local/share/opencode/auth.json（API key，同 e2e-check.ts）
-    /// 3. ~/.config/opencode/opencode.json（provider apiKey / baseURL）
+    /// 3. ~/.config/opencode/opencode.json(.jsonc)（provider apiKey / baseURL，jsonc 优先见 OpenCodeConfig）
     /// 4. ~/.config/opencode/tui.json（glm-balance 插件条目的 organization / project 等选项，同 deploy.mjs 匹配规则）
     /// </summary>
     public static AppConfig Load(string? configDir = null)
@@ -136,8 +136,8 @@ public sealed class AppConfig
             }
         }
 
-        // 3) opencode.json：provider 的 baseURL / apiKey
-        var ocPath = Path.Combine(home, ".config", "opencode", "opencode.json");
+        // 3) opencode.json(.jsonc)：provider 的 baseURL / apiKey
+        var ocPath = OpenCodeConfig.ResolveConfigPath(home); // jsonc 优先（opencode 合并语义 jsonc 覆盖 json）
         using (var doc = TryReadJson(ocPath, cfg.Warnings))
         {
             var providers = doc?.RootElement.Prop("provider");
@@ -201,7 +201,7 @@ public sealed class AppConfig
         if (cfg.ApiKey == null)
         {
             cfg.Warnings.Add(
-                "未找到 API key：请确认 ~/.local/share/opencode/auth.json 或 ~/.config/opencode/opencode.json 已配置智谱 provider，" +
+                "未找到 API key：请确认 ~/.local/share/opencode/auth.json 或 ~/.config/opencode/opencode.json(.jsonc) 已配置智谱 provider，" +
                 "或在 exe 同目录 glmbalance-taskbar.json 中设置 apiKey");
         }
         return cfg;
@@ -223,7 +223,7 @@ public sealed class AppConfig
         {
             if (!File.Exists(path)) return null;
             using var stream = File.OpenRead(path);
-            return JsonDocument.Parse(stream);
+            return JsonDocument.Parse(stream, OpenCodeConfig.Parsing); // JSONC 容错（opencode.jsonc 合法含注释/尾逗号；对纯 JSON 零影响）
         }
         catch (Exception ex)
         {

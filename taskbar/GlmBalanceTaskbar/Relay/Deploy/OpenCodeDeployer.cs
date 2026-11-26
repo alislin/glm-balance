@@ -5,10 +5,11 @@ using System.Text.Json.Nodes;
 namespace GlmBalanceTaskbar;
 
 /// <summary>
-/// opencode 部署器：备份 opencode.json.bak-yyyyMMddHHmmss → 合并写入 localrelay provider
+/// opencode 部署器：备份 opencode.json(c).bak-yyyyMMddHHmmssfff → 合并写入 localrelay provider
 /// （npm @ai-sdk/openai-compatible、baseURL 指向本中转、apiKey=localToken、models=池并集）。
 /// 「设为全局默认」把顶层 "model" 改为 localrelay/&lt;模型&gt;（独立开关）。
 /// 红线：绝不删除/修改既有 provider 条目。
+/// 配置文件：jsonc 优先、json 兜底（见 OpenCodeConfig）；两者皆缺 → 部署时自动创建。
 /// </summary>
 public sealed class OpenCodeDeployer : IAgentDeployer
 {
@@ -19,21 +20,25 @@ public sealed class OpenCodeDeployer : IAgentDeployer
     public OpenCodeDeployer()
     {
         var home = HomeOverride.GetUserProfile(); // §2.3：home 重定向（仅 home 来源变化，逻辑零改动）
-        ConfigPath = Path.Combine(home, ".config", "opencode", "opencode.json");
+        ConfigPath = OpenCodeConfig.ResolveConfigPath(home); // jsonc 优先（opencode 合并语义 jsonc 覆盖 json）
     }
 
     public Task<DeployPreview> PreviewAsync(DeployRequest req, CancellationToken ct = default)
     {
-        if (!File.Exists(ConfigPath))
-        {
-            return Task.FromResult(new DeployPreview(AgentId, ConfigPath, "配置文件不存在，无法部署", Ready: false));
-        }
+        var exists = File.Exists(ConfigPath);
         try
         {
-            using var doc = JsonDocument.Parse(File.ReadAllText(ConfigPath));
-            var root = JsonNode.Parse(doc.RootElement.GetRawText())!.AsObject();
+            JsonObject root;
+            if (exists)
+            {
+                root = JsonNode.Parse(File.ReadAllText(ConfigPath), documentOptions: OpenCodeConfig.Parsing)!.AsObject();
+            }
+            else
+            {
+                root = new JsonObject(); // 全新环境：部署时自动创建
+            }
             var provider = EnsureProviderObject(root);
-            var summary = BuildSummary(root, provider, req);
+            var summary = BuildSummary(root, provider, req, exists);
             return Task.FromResult(new DeployPreview(AgentId, ConfigPath, summary, Ready: true));
         }
         catch (Exception ex)
@@ -44,26 +49,34 @@ public sealed class OpenCodeDeployer : IAgentDeployer
 
     public async Task<DeployResult> DeployAsync(DeployRequest req, CancellationToken ct = default)
     {
-        if (!File.Exists(ConfigPath))
+        var exists = File.Exists(ConfigPath);
+
+        string? backupPath = null;
+        if (exists)
         {
-            return new DeployResult(false, null, "配置文件不存在，无法部署");
+            try
+            {
+                // fff 毫秒：防同一秒内重复部署时 .bak 同名碰撞（File.Copy overwrite:false 会拒绝写入）
+                backupPath = ConfigPath + ".bak-" + DateTime.Now.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture);
+                File.Copy(ConfigPath, backupPath, overwrite: false);
+            }
+            catch (Exception ex)
+            {
+                return new DeployResult(false, null, $"备份失败，已中止写入：{ex.Message}");
+            }
         }
 
-        string backupPath;
         try
         {
-            backupPath = ConfigPath + ".bak-" + DateTime.Now.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
-            File.Copy(ConfigPath, backupPath, overwrite: false);
-        }
-        catch (Exception ex)
-        {
-            return new DeployResult(false, null, $"备份失败，已中止写入：{ex.Message}");
-        }
-
-        try
-        {
-            using var doc = JsonDocument.Parse(File.ReadAllText(ConfigPath));
-            var root = JsonNode.Parse(doc.RootElement.GetRawText())!.AsObject();
+            JsonObject root;
+            if (exists)
+            {
+                root = JsonNode.Parse(File.ReadAllText(ConfigPath), documentOptions: OpenCodeConfig.Parsing)!.AsObject();
+            }
+            else
+            {
+                root = new JsonObject(); // 全新环境：自动创建（仅含 localrelay，可选全局 model）
+            }
             var provider = EnsureProviderObject(root);
 
             // 只新增/替换 localrelay 一个条目；其余 provider 原样保留（含注释外的全部字段）
@@ -78,13 +91,17 @@ public sealed class OpenCodeDeployer : IAgentDeployer
 
             await WriteAtomicAsync(ConfigPath, root.ToJsonString(RelayJson.Indented))
                 .ConfigureAwait(false);
+            var lead = exists
+                ? "已写入 localrelay provider"
+                : "配置文件不存在，已自动创建并写入 localrelay provider";
             return new DeployResult(true, backupPath,
-                "已写入 localrelay provider" + (req.SetDefault ? " 并设为全局默认模型" : "") +
-                $"；备份：{Path.GetFileName(backupPath)}");
+                lead + (req.SetDefault ? " 并设为全局默认模型" : "") +
+                (backupPath != null ? $"；备份：{Path.GetFileName(backupPath)}" : "（新文件，无需备份）"));
         }
         catch (Exception ex)
         {
-            return new DeployResult(false, backupPath, $"写入失败：{ex.Message}（备份保留在 {Path.GetFileName(backupPath)}）");
+            return new DeployResult(false, backupPath, $"写入失败：{ex.Message}" +
+                (backupPath != null ? $"（备份保留在 {Path.GetFileName(backupPath)}）" : ""));
         }
     }
 
@@ -97,7 +114,7 @@ public sealed class OpenCodeDeployer : IAgentDeployer
         else File.Move(tmp, path);
     }
 
-    string BuildSummary(JsonObject root, JsonObject provider, DeployRequest req)
+    string BuildSummary(JsonObject root, JsonObject provider, DeployRequest req, bool exists)
     {
         var existing = provider["localrelay"] != null;
         var model = req.Models.Contains("glm-5.3-flash", StringComparer.Ordinal)
@@ -114,11 +131,20 @@ public sealed class OpenCodeDeployer : IAgentDeployer
             ["models"] = new JsonObject(req.Models.Select(m =>
                 new KeyValuePair<string, JsonNode?>(m, BuildModelNode(m)))),
         };
-        return (existing ? "将替换现有 localrelay 条目：\n" : "将新增 provider 条目：\n")
+        var header = !exists
+            ? $"配置文件不存在，部署时将自动创建（{Path.GetFileName(ConfigPath)}）：\n"
+            : existing
+                ? "将替换现有 localrelay 条目：\n"
+                : "将新增 provider 条目：\n";
+        var redline = !exists
+            ? "红线承诺：全新创建，仅含 localrelay provider" + (req.SetDefault ? "与全局默认 model" : "") + "。"
+            : "红线承诺：不删除/不修改既有 provider 条目；写入前自动备份 " +
+              Path.GetFileName(ConfigPath) + ".bak-<时间戳>。";
+        return header
             + relay.ToJsonString(RelayJson.Indented)
             + "\n\n将写入的模型并集：" + string.Join(", ", req.Models)
             + (req.SetDefault ? $"\n全局默认 model → localrelay/{model}" : "\n全局默认 model 保持不变（当前：" + (root["model"]?.ToString() ?? "(未设)") + "）")
-            + "\n\n红线承诺：不删除/不修改既有 provider 条目；写入前自动备份 opencode.json.bak-<时间戳>。";
+            + "\n\n" + redline;
     }
 
     static JsonObject EnsureProviderObject(JsonObject root)

@@ -40,6 +40,33 @@ static class Program
     {
         // --dev 必须最先解析（在 --once / --dump-icon / --relay-init / --headless 判定之前，组合语义才生效）
         DevMode.Initialize(args);
+
+        // ── CLI 子命令分派（早退；在一切既有 flag 判定之前）──
+        // 剥离 --json / --help；--port / --config-dir 取值由 CliRunner.ExtractGlobals 消费。
+        var jsonOut = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+        var helpFlag = args.Any(a => a.Equals("--help", StringComparison.OrdinalIgnoreCase) || a.Equals("-h", StringComparison.OrdinalIgnoreCase));
+        var cliFirst = args.FirstOrDefault(a => !a.StartsWith('-') &&
+            !a.Equals("--dev", StringComparison.OrdinalIgnoreCase));
+        // help 优先级最高（--help 或 help 命令，含 UI 态误带 --help 的兜底）
+        if (helpFlag || cliFirst != null && cliFirst.Equals("help", StringComparison.OrdinalIgnoreCase))
+        {
+            AttachParentConsole();
+            var topic = args.SkipWhile(a => a.StartsWith('-') ||
+                       a.Equals("--port", StringComparison.OrdinalIgnoreCase) ||
+                       a.Equals("--config-dir", StringComparison.OrdinalIgnoreCase) ||
+                       a.Equals("help", StringComparison.OrdinalIgnoreCase))
+                       .ToArray();
+            CliHelp.Print(topic);
+            return 0;
+        }
+        // 子命令分派（status/relay/channel/...）：CliRunner 返回 null = 不是子命令，走既有分派
+        var cliCode = CliRunner.TryDispatch(args, jsonOut);
+        if (cliCode is int code)
+        {
+            AttachParentConsole();
+            return code;
+        }
+        // 纯全局选项且无命令 → 继续 UI/flag 分派（--json/--help 已在上面处理）
         AssertProductionIdentifiersUnchanged();
 
         if (args.Any(a => a.Equals("--once", StringComparison.OrdinalIgnoreCase)))
@@ -173,11 +200,11 @@ static class Program
     }
 
     /// <summary>
-    /// 无头首启初始化（--relay-init &lt;dir&gt;）：对 &lt;dir&gt;\glmbalance-taskbar.json 执行与 UI
+    /// 无头首启初始化（--relay-init &lt;dir&gt; / CLI init &lt;dir&gt;）：对 &lt;dir&gt;\glmbalance-taskbar.json 执行与 UI
     /// 「启用中转」开关完全相同的初始化例程。目标文件独立于 exe 同目录配置读取；不监听端口，
     /// 可在 live 实例运行时安全执行。退出码：0=成功（含幂等跳过），1=失败。
     /// </summary>
-    static int RunRelayInit(string dir)
+    internal static int RunRelayInit(string dir)
     {
         AttachParentConsole();
         try

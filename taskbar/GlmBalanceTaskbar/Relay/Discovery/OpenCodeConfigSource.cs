@@ -3,7 +3,8 @@ using System.Text.Json;
 namespace GlmBalanceTaskbar;
 
 /// <summary>
-/// opencode 配置发现：枚举 auth.json + opencode.json 的全部 provider 条目（合并去重）。
+/// opencode 配置发现：枚举 auth.json + opencode.json(c)（jsonc 优先，见 OpenCodeConfig）的全部
+/// provider 条目（合并去重）。
 /// baseURL 含 bigmodel.cn / api.z.ai → SuggestedProbeType = zhipu-monitor，否则 none。
 /// </summary>
 public sealed class OpenCodeConfigSource : IAgentConfigSource
@@ -27,8 +28,8 @@ public sealed class OpenCodeConfigSource : IAgentConfigSource
                 Source: "auth.json");
         }
 
-        // 2) opencode.json：provider.<id> { name / options.baseURL / options.apiKey / models{} }
-        var ocPath = Path.Combine(home, ".config", "opencode", "opencode.json");
+        // 2) opencode.json(.jsonc)：provider.<id> { name / options.baseURL / options.apiKey / models{} }
+        var ocPath = OpenCodeConfig.ResolveConfigPath(home); // jsonc 优先（opencode 合并语义 jsonc 覆盖 json）
         foreach (var p in ReadOpencodeProviders(ocPath))
         {
             if (byId.TryGetValue(p.Id, out var prev))
@@ -36,7 +37,7 @@ public sealed class OpenCodeConfigSource : IAgentConfigSource
                 // 合并：opencode.json 条目信息更全（baseURL/models），key 取先到者
                 var key = p.ApiKey ?? prev.ApiKey;
                 var models = p.Models ?? prev.Models;
-                byId[p.Id] = p with { ApiKey = key, Models = models, Source = "opencode.json + auth.json" };
+                byId[p.Id] = p with { ApiKey = key, Models = models, Source = $"{Path.GetFileName(ocPath)} + auth.json" };
             }
             else
             {
@@ -54,7 +55,7 @@ public sealed class OpenCodeConfigSource : IAgentConfigSource
         try
         {
             if (!File.Exists(path)) return result;
-            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            using var doc = JsonDocument.Parse(File.ReadAllText(path), OpenCodeConfig.Parsing); // JSONC 容错（auth.json 恒为纯 JSON，选项零影响）
             if (doc.RootElement.ValueKind != JsonValueKind.Object) return result;
             foreach (var e in doc.RootElement.EnumerateObject())
             {
@@ -74,7 +75,7 @@ public sealed class OpenCodeConfigSource : IAgentConfigSource
         try
         {
             if (!File.Exists(path)) return result;
-            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            using var doc = JsonDocument.Parse(File.ReadAllText(path), OpenCodeConfig.Parsing); // JSONC 容错
             var providers = doc.RootElement.Prop("provider");
             if (providers is not { ValueKind: JsonValueKind.Object }) return result;
             foreach (var p in providers.Value.EnumerateObject())
@@ -91,7 +92,7 @@ public sealed class OpenCodeConfigSource : IAgentConfigSource
                 }
                 result.Add(new DiscoveredProvider(
                     "opencode", p.Name, name, baseUrl, key, models,
-                    SuggestProbe(p.Name, baseUrl), "opencode.json"));
+                    SuggestProbe(p.Name, baseUrl), Path.GetFileName(path)));
             }
         }
         catch
